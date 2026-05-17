@@ -1,17 +1,18 @@
 //! One-shot CLI subcommand implementations: `invite`, `peers`, `remove`,
-//! `join`, `dump-state`, and the per-folder daemon lock.
+//! `join`, `dump-state`, `scan`, and the per-folder daemon lock.
 
 use crate::cli::{encode_ticket, parse_join_ticket};
-use crate::discovery::AddressBook;
+use crate::discovery::{AddressBook, PeerInfo};
 use crate::group::{GroupState, add_invite, generate_secret, now_ms};
-use crate::identity::Identity;
+use crate::identity::{Identity, NodeId};
 use crate::rpc::RpcClient;
 use crate::state::{Entry, EntryKind, hex, load_stored_entries};
 use crate::tree::derive_tree;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub const KEY_FILE: &str = "private.key";
 pub const PEERS_FILE: &str = "peers.json";
@@ -46,6 +47,58 @@ pub fn peers_cmd(state_dir: &Path) -> io::Result<()> {
         println!("{:?} {}{}", member.status, member.id, marker);
     }
     Ok(())
+}
+
+pub async fn scan_cmd(watch: bool) -> io::Result<()> {
+    let address_book = crate::discovery::new_address_book();
+    // Use a zero NodeId — we have no local identity, so nothing to filter out.
+    let _mdns =
+        crate::discovery::spawn_browser(NodeId::from_bytes([0; 32]), Arc::clone(&address_book))?;
+
+    if watch {
+        let frames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+        let mut tick = 0usize;
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => break,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    render_scan(&address_book, Some(frames[tick % frames.len()])).await;
+                    tick = tick.wrapping_add(1);
+                }
+            }
+        }
+    } else {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        render_scan(&address_book, None).await;
+    }
+    Ok(())
+}
+
+async fn render_scan(address_book: &AddressBook, spinner: Option<&str>) {
+    if let Some(s) = spinner {
+        print!("\x1b[2J\x1b[H");
+        println!("lilsync nodes on LAN  {s}");
+        println!();
+    }
+    let peers = address_book.read().await;
+    if peers.is_empty() {
+        println!("no peers found");
+        let _ = io::stdout().flush();
+        return;
+    }
+    println!("{:<64}  {:<16}  {:<6}  {}", "ID", "IP", "PORT", "NAME");
+    let mut sorted: Vec<(&NodeId, &PeerInfo)> = peers.iter().collect();
+    sorted.sort_by_key(|(id, _)| id.to_string());
+    for (id, info) in sorted {
+        println!(
+            "{:<64}  {:<16}  {:<6}  {}",
+            id.to_string(),
+            info.addr.ip(),
+            info.addr.port(),
+            info.name.as_deref().unwrap_or("-"),
+        );
+    }
+    let _ = io::stdout().flush();
 }
 
 pub fn status_cmd(folder: &Path) -> io::Result<()> {

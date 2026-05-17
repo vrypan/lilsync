@@ -110,6 +110,12 @@ pub enum Command {
         /// Folder whose group to inspect
         folder: PathBuf,
     },
+    /// Discover lilsync nodes advertised on the local network via mDNS
+    Scan {
+        /// Stay alive and refresh the list as peers appear or disappear
+        #[arg(long)]
+        watch: bool,
+    },
     /// Show local sync state and peer list
     Status {
         /// Folder to inspect

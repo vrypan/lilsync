@@ -82,7 +82,14 @@ impl FolderState {
         if state.prune_tombstones_covered_by_watermark() > 0 {
             state.save_entries();
         }
+        tracing::info!("scan started");
+        let scan_start = std::time::Instant::now();
         let changes = state.rescan()?;
+        tracing::info!(
+            "scan done elapsed_ms={} changes={}",
+            scan_start.elapsed().as_millis(),
+            changes.len()
+        );
         if !changes.is_empty() {
             state.save_entries();
         }

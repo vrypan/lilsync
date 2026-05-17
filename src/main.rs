@@ -24,7 +24,7 @@ mod watcher;
 use crate::cli::{Cli, Command};
 use crate::commands::{
     KEY_FILE, PEERS_FILE, PID_FILE, create_invite, daemonize, dump_state_cmd, join_group,
-    peers_cmd, remove_peer_cmd, status_cmd, stop_cmd,
+    peers_cmd, remove_peer_cmd, scan_cmd, status_cmd, stop_cmd,
 };
 use crate::daemon::run_sync;
 use clap::Parser;
@@ -92,6 +92,10 @@ async fn run(cli: Cli) -> io::Result<()> {
             let state_dir = folder.join(".lil");
             fs::create_dir_all(&state_dir)?;
             return peers_cmd(&state_dir);
+        }
+        Command::Scan { watch } => {
+            scan_cmd(watch).await?;
+            return Ok(());
         }
         Command::Status { folder } => {
             return status_cmd(&folder);
