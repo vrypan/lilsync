@@ -1,10 +1,10 @@
 > [!WARNING]
-> `lil` is **experimental**! There may be bugs that could DELETE or EXPOSE
+> `lilsync` is **experimental**! There may be bugs that could DELETE or EXPOSE
 > your files. I use it, but **use it at your own risk.**
 
 # lil — a little tool to sync your files
 
-`lil` syncs a folder between a small, **trusted** group of nodes.
+`lilsync` syncs a folder between a small, **trusted** group of nodes.
 
 - Designed for peer-to-peer sync between your own machines or other trusted
   peers.
@@ -26,7 +26,7 @@
 cargo build --release
 ```
 
-The binary is `lil` (`target/release/lil`).
+The binary is `lilsync` (`target/release/lilsync`).
 
 ## Basic Usage
 
@@ -34,20 +34,20 @@ Start the sync daemon in the background (creates a new single-node group on
 first run):
 
 ```bash
-lil start /path/to/folder
+lilsync start /path/to/folder
 ```
 
 Logs are written to `/path/to/folder/.lil/sync.log` (10 MB rolling, one
 backup). To stop the daemon:
 
 ```bash
-lil stop /path/to/folder
+lilsync stop /path/to/folder
 ```
 
 To run in the foreground instead (useful for debugging):
 
 ```bash
-lil watch /path/to/folder
+lilsync watch /path/to/folder
 ```
 
 State is stored inside the synced folder under `.lil/`:
@@ -70,32 +70,32 @@ State is stored inside the synced folder under `.lil/`:
 Generate an invite on the first node:
 
 ```bash
-lil invite /path/to/folder
+lilsync invite /path/to/folder
 ```
 
 This prints an 86-character base62 ticket. On the second node:
 
 ```bash
-lil join /path/to/folder2 <ticket>
+lilsync join /path/to/folder2 <ticket>
 ```
 
 `join` completes the handshake and then starts the daemon in the foreground.
-Use `--exit` to join and exit instead, then run `lil start` to launch the
+Use `--exit` to join and exit instead, then run `lilsync start` to launch the
 background daemon.
 
 ## Subcommands
 
 ```
-lil start  <folder> [--name <name>] [--poll] [--interval-ms <ms>]
+lilsync start  <folder> [--name <name>] [--poll] [--interval-ms <ms>]
                     [--announce-interval-secs <secs>]
-lil watch  <folder> [--name <name>] [--poll] [--interval-ms <ms>]
+lilsync watch  <folder> [--name <name>] [--poll] [--interval-ms <ms>]
                     [--announce-interval-secs <secs>] [--status]
-lil stop   <folder>
-lil status <folder>
-lil invite <folder> [--expire-secs <secs>]
-lil join   <folder> <ticket> [--name <name>] [--exit]
-lil peers  <folder>
-lil remove <folder> <id>
+lilsync stop   <folder>
+lilsync status <folder>
+lilsync invite <folder> [--expire-secs <secs>]
+lilsync join   <folder> <ticket> [--name <name>] [--exit]
+lilsync peers  <folder>
+lilsync remove <folder> <id>
 ```
 
 - `start` forks into the background; logs go to `<folder>/.lil/sync.log`.
@@ -127,7 +127,7 @@ Supported syntax (gitignore-like):
 - leading `/` anchors to the root
 - trailing `/` matches directories only
 
-When `.nolil` changes, `lil` rescans the folder. Newly ignored paths stop
+When `.nolil` changes, `lilsync` rescans the folder. Newly ignored paths stop
 being tracked locally; they are **not** deleted on remote peers.
 
 ## Notes
@@ -150,13 +150,13 @@ being tracked locally; they are **not** deleted on remote peers.
 
 ## Debugging
 
-Use `lil watch` to keep the daemon in the foreground. Log verbosity is
+Use `lilsync watch` to keep the daemon in the foreground. Log verbosity is
 controlled via `RUST_LOG` (default: `info`):
 
 ```bash
-RUST_LOG=info  lil watch /tmp/node-a
-RUST_LOG=debug lil watch /tmp/node-a
+RUST_LOG=info  lilsync watch /tmp/node-a
+RUST_LOG=debug lilsync watch /tmp/node-a
 ```
 
-When running as a background daemon (`lil start`), logs are written to
+When running as a background daemon (`lilsync start`), logs are written to
 `<folder>/.lil/sync.log`. `RUST_LOG` is still respected.

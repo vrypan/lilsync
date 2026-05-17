@@ -324,7 +324,7 @@ pub fn stop_cmd(state_dir: &Path) -> io::Result<()> {
 pub fn stop_cmd(_state_dir: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "lil stop is not supported on this platform",
+        "lilsync stop is not supported on this platform",
     ))
 }
 
@@ -343,7 +343,7 @@ pub fn acquire_daemon_lock(state_dir: &Path) -> io::Result<fs::File> {
         let err = io::Error::last_os_error();
         if err.kind() == io::ErrorKind::WouldBlock {
             return Err(io::Error::other(
-                "another lil instance is already running on this folder",
+                "another lilsync instance is already running on this folder",
             ));
         }
         return Err(err);
@@ -360,7 +360,7 @@ pub fn acquire_daemon_lock(state_dir: &Path) -> io::Result<fs::File> {
         .open(lock_path)
         .map_err(|err| {
             if err.kind() == io::ErrorKind::AlreadyExists {
-                io::Error::other("another lil instance is already running on this folder")
+                io::Error::other("another lilsync instance is already running on this folder")
             } else {
                 err
             }
@@ -392,7 +392,7 @@ mod tests {
 
         assert_eq!(
             second.to_string(),
-            "another lil instance is already running on this folder"
+            "another lilsync instance is already running on this folder"
         );
         drop(first);
         let _third = acquire_daemon_lock(tmp.path()).unwrap();

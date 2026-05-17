@@ -28,7 +28,7 @@ Degree: functional. The structure is a directory trie, not a compressed radix tr
 
 ### Folder Monitoring
 
-- `lil start <path>` / `lil watch <path>` monitors a folder and logs local tree changes.
+- `lilsync start <path>` / `lilsync watch <path>` monitors a folder and logs local tree changes.
 - Native filesystem notifications are used by default through `notify`.
 - `--poll` is available as a fallback.
 - Changes are debounced by `--interval-ms`.
@@ -108,7 +108,7 @@ Tombstone correctness guarantees:
 - Any node can create a one-time ticket with:
 
 ```text
-lil invite <folder>
+lilsync invite <folder>
 ```
 
 - Tickets are a compact 86-character base62 string encoding the 32-byte issuer node ID and 32-byte secret concatenated.
@@ -116,17 +116,17 @@ lil invite <folder>
 - A joining node uses:
 
 ```text
-lil join <folder> <86-char-base62-ticket>
+lilsync join <folder> <86-char-base62-ticket>
 ```
 
 - The issuer validates and consumes the ticket.
 - The issuer adds the joiner to the peer ledger.
 - The join response returns the gossip topic ID and full peer list.
-- `lil join ... --exit` writes the joined group state and exits instead of starting the daemon, for service-manager setup.
+- `lilsync join ... --exit` writes the joined group state and exits instead of starting the daemon, for service-manager setup.
 - The issuer broadcasts the updated peer list through gossip.
 - Other peers merge newer member entries by Lamport.
 
-Degree: functional for adding and removing peers. Peers can announce a human-readable `--name`; names propagate via the Join RPC and Peers gossip. Any peer can remove another with `lil remove <folder> <id|name>`; the change persists to `peers.json` and broadcasts on next daemon start.
+Degree: functional for adding and removing peers. Peers can announce a human-readable `--name`; names propagate via the Join RPC and Peers gossip. Any peer can remove another with `lilsync remove <folder> <id|name>`; the change persists to `peers.json` and broadcasts on next daemon start.
 
 ## Verified
 
@@ -164,56 +164,56 @@ cargo clippy --all-targets -- -D warnings
 Start the daemon in the background (creates a new group on first run):
 
 ```text
-lil start ./tmp1
-lil start ./tmp1 --name alice --poll
+lilsync start ./tmp1
+lilsync start ./tmp1 --name alice --poll
 ```
 
 Run in the foreground (useful for debugging):
 
 ```text
-lil watch ./tmp1
-lil watch ./tmp1 --status
+lilsync watch ./tmp1
+lilsync watch ./tmp1 --status
 ```
 
 Stop the background daemon:
 
 ```text
-lil stop ./tmp1
+lilsync stop ./tmp1
 ```
 
 Show local state and peer list (no running daemon required):
 
 ```text
-lil status ./tmp1
+lilsync status ./tmp1
 ```
 
 Create an invite:
 
 ```text
-lil invite ./tmp1 --expire-secs 3600
+lilsync invite ./tmp1 --expire-secs 3600
 ```
 
 Join from another folder (runs `watch` after a successful join):
 
 ```text
-lil join ./tmp2 <86-char-base62-ticket>
+lilsync join ./tmp2 <86-char-base62-ticket>
 ```
 
 Join and exit so a service manager can start the daemon:
 
 ```text
-lil join ./tmp2 <86-char-base62-ticket> --exit
-lil start ./tmp2
+lilsync join ./tmp2 <86-char-base62-ticket> --exit
+lilsync start ./tmp2
 ```
 
 List known peers:
 
 ```text
-lil peers ./tmp1
+lilsync peers ./tmp1
 ```
 
 Remove a peer by ID:
 
 ```text
-lil remove ./tmp1 <id>
+lilsync remove ./tmp1 <id>
 ```

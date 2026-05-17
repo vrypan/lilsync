@@ -8,7 +8,7 @@ use std::io;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "lil", about = "lilsync folder sync daemon")]
+#[command(name = "lilsync", about = "lilsync folder sync daemon")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -86,7 +86,7 @@ pub enum Command {
     Join {
         /// Folder to sync
         folder: PathBuf,
-        /// 86-character base62 ticket from `lil invite`
+        /// 86-character base62 ticket from `lilsync invite`
         ticket: String,
         /// Human-readable name for this node
         #[arg(long)]

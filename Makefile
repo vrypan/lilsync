@@ -1,4 +1,4 @@
-PKG_NAME := lil
+PKG_NAME := lilsync
 VERSION := $(shell cargo metadata --no-deps --format-version 1 | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
 DIST_DIR := dist
 CARGO_PROFILE := dist

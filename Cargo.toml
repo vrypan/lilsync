@@ -1,6 +1,6 @@
 [package]
 name = "lilsync"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "a little tool to sync your files"
 license = "MIT"
@@ -8,7 +8,7 @@ repository = "https://github.com/vrypan/lilsync"
 homepage = "https://github.com/vrypan/lilsync"
 
 [[bin]]
-name = "lil"
+name = "lilsync"
 path = "src/main.rs"
 
 [dependencies]

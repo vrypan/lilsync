@@ -156,7 +156,7 @@ pub fn print_start(
 ) {
     tracing::info!("node {}", local_id);
     tracing::info!("rpc port {}", rpc_port);
-    tracing::info!("invite command: lil invite {}", state.root().display());
+    tracing::info!("invite command: lilsync invite {}", state.root().display());
     tracing::info!("known peers {}", bootstrap.len());
     tracing::info!("watching {}", state.root().display());
     if poll {
