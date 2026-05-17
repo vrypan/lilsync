@@ -8,7 +8,7 @@ use std::io;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "lilsync", about = "lilsync folder sync daemon")]
+#[command(name = "lilsync", about = "lilsync folder sync daemon", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
