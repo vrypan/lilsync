@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v0.2.3)"
+        required: true
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Build
+        run: cargo build --profile dist --target aarch64-apple-darwin
+
+      - name: Package
+        run: |
+          ARCHIVE="lilsync-${{ inputs.version }}-aarch64-apple-darwin"
+          mkdir -p "dist/$ARCHIVE"
+          cp target/aarch64-apple-darwin/dist/lilsync README.md LICENSE "dist/$ARCHIVE/"
+          tar -czf "$ARCHIVE.tar.gz" -C dist "$ARCHIVE"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-archive
+          path: "*.tar.gz"
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - uses: goto-bus-stop/setup-zig@v2.2.1
+        with:
+          version: "0.13.0"
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build x86_64
+        run: cargo zigbuild --profile dist --target x86_64-unknown-linux-musl
+
+      - name: Build aarch64
+        run: cargo zigbuild --profile dist --target aarch64-unknown-linux-musl
+
+      - name: Package
+        run: |
+          for TARGET in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            ARCHIVE="lilsync-${{ inputs.version }}-$TARGET"
+            mkdir -p "dist/$ARCHIVE"
+            cp "target/$TARGET/dist/lilsync" README.md LICENSE "dist/$ARCHIVE/"
+            tar -czf "$ARCHIVE.tar.gz" -C dist "$ARCHIVE"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-archives
+          path: "*.tar.gz"
+
+  release:
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.version }}
+          name: ${{ inputs.version }}
+          files: "*.tar.gz"
+          generate_release_notes: true
+
+  homebrew:
+    needs: release
+    uses: ./.github/workflows/update-homebrew-formula.yml
+    with:
+      tag: ${{ inputs.version }}
+    secrets: inherit
+
