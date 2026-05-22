@@ -20,13 +20,44 @@
 > [!NOTE]
 > See [SECURITY.md](SECURITY.md) for the full threat model and known limitations.
 
-## Build
+## Installation
+
+### Release binaries
+
+Download the archive for your platform from the
+[latest release](https://github.com/vrypan/lil/releases/latest), then install the
+`lilsync` binary somewhere on your `PATH`:
+
+```bash
+tar -xzf lilsync-*.tar.gz
+sudo install -m 0755 lilsync-*/lilsync /usr/local/bin/lilsync
+```
+
+Release archives are named by version and target, for example
+`lilsync-0.3.2-aarch64-apple-darwin.tar.gz` or
+`lilsync-0.3.2-x86_64-unknown-linux-musl.tar.gz`.
+
+### Homebrew
+
+On macOS, install with Homebrew:
+
+```bash
+brew install vrypan/tap/lilsync
+```
+
+### Build from source
+
+Install Rust 1.94.1 or newer, then build the release binary:
 
 ```bash
 cargo build --release
 ```
 
-The binary is `lilsync` (`target/release/lilsync`).
+The binary is `target/release/lilsync`. To install it:
+
+```bash
+sudo install -m 0755 target/release/lilsync /usr/local/bin/lilsync
+```
 
 ## Basic Usage
 
