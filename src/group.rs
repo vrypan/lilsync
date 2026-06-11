@@ -222,6 +222,7 @@ pub fn add_invite(path: &Path, secret: &str, expires_at_ms: u64) -> io::Result<(
 
 pub fn consume_invite(path: &Path, secret: &str) -> io::Result<bool> {
     let mut invites = load_invites(path)?;
+    let original_len = invites.len();
     let now = now_ms()?;
     let secret_hash = hash_secret(secret);
     let mut found = false;
@@ -237,7 +238,12 @@ pub fn consume_invite(path: &Path, secret: &str) -> io::Result<bool> {
         true
     });
 
-    save_invites(path, &invites)?;
+    // Only rewrite the file if something actually changed: a consumed token or
+    // pruned expired tokens. A failed attempt against a valid set of invites
+    // must not trigger a disk write, so spamming Join cannot amplify into I/O.
+    if invites.len() != original_len {
+        save_invites(path, &invites)?;
+    }
     Ok(found)
 }
 
