@@ -4,7 +4,7 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -82,7 +82,7 @@ impl Identity {
             fs::create_dir_all(parent)?;
         }
         let mut bytes = [0u8; 32];
-        fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+        getrandom::getrandom(&mut bytes).map_err(io::Error::other)?;
         fs::write(path, bytes)?;
         Ok(Self {
             signing_key: SigningKey::from_bytes(&bytes),

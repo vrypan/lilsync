@@ -6,7 +6,7 @@ use crate::state::hex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -243,7 +243,7 @@ pub fn consume_invite(path: &Path, secret: &str) -> io::Result<bool> {
 
 pub fn generate_secret() -> io::Result<[u8; 32]> {
     let mut bytes = [0u8; 32];
-    fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    getrandom::getrandom(&mut bytes).map_err(io::Error::other)?;
     Ok(bytes)
 }
 

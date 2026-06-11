@@ -643,6 +643,7 @@ dependencies = [
  "blake3",
  "clap",
  "ed25519-dalek",
+ "getrandom 0.2.17",
  "libc",
  "mdns-sd",
  "notify",
