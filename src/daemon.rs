@@ -332,7 +332,7 @@ pub async fn run_sync(
                     }
                     rpc::RpcEvent::Announcement { peer, message } => {
                         tracing::debug!("announcement from {peer}");
-                        handle_announcement(message, shared.clone()).await?;
+                        handle_announcement(peer, message, shared.clone()).await?;
                     }
                 }
             }
@@ -609,7 +609,21 @@ async fn publish(rpc_client: &RpcClient, group: Arc<RwLock<GroupState>>, message
     }
 }
 
-async fn handle_announcement(message: GossipMessage, shared: DaemonShared) -> io::Result<()> {
+async fn handle_announcement(
+    peer: NodeId,
+    message: GossipMessage,
+    shared: DaemonShared,
+) -> io::Result<()> {
+    // The announcement's self-asserted origin must match the cryptographically
+    // authenticated RPC peer. Otherwise a member could forge another member's
+    // origin and pollute root reports (e.g. to trigger premature tombstone GC).
+    if message.origin() != peer.to_string() {
+        tracing::warn!(
+            "ignored announcement: origin {} does not match authenticated peer {peer}",
+            message.origin()
+        );
+        return Ok(());
+    }
     if message.origin() == shared.local_origin {
         return Ok(());
     }
