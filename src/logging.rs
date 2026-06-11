@@ -66,10 +66,10 @@ impl RollingWriter {
 
 impl Write for RollingWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.written >= MAX_LOG_BYTES {
-            if let Err(err) = self.rotate() {
-                let _ = writeln!(self.file, "[log rotation failed: {err}]");
-            }
+        if self.written >= MAX_LOG_BYTES
+            && let Err(err) = self.rotate()
+        {
+            let _ = writeln!(self.file, "[log rotation failed: {err}]");
         }
         let n = self.file.write(buf)?;
         self.written += n as u64;

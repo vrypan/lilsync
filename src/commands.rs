@@ -86,7 +86,7 @@ async fn render_scan(address_book: &AddressBook, spinner: Option<&str>) {
         let _ = io::stdout().flush();
         return;
     }
-    println!("{:<64}  {:<16}  {:<6}  {}", "ID", "IP", "PORT", "NAME");
+    println!("{:<64}  {:<16}  {:<6}  NAME", "ID", "IP", "PORT");
     let mut sorted: Vec<(&NodeId, &PeerInfo)> = peers.iter().collect();
     sorted.sort_by_key(|(id, _)| id.to_string());
     for (id, info) in sorted {
@@ -275,7 +275,7 @@ pub fn daemonize() -> io::Result<()> {
             0 => {}
             _ => std::process::exit(0),
         }
-        let devnull = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
         if devnull >= 0 {
             libc::dup2(devnull, libc::STDIN_FILENO);
             libc::dup2(devnull, libc::STDOUT_FILENO);
