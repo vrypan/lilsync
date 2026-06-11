@@ -338,7 +338,7 @@ async fn reconcile_entries(
             });
         } else {
             let mut state = ctx.state.write().await;
-            if let Some(change) = state.apply_remote_entry(entry, None)? {
+            for change in state.apply_remote_entry(entry, None)? {
                 log_applied(&change);
                 changes.push(change);
             }
@@ -352,7 +352,7 @@ async fn reconcile_entries(
             continue;
         };
         let mut state = ctx.state.write().await;
-        if let Some(change) = state.apply_remote_entry(entry, Some(&tmp_path))? {
+        for change in state.apply_remote_entry(entry, Some(&tmp_path))? {
             log_applied(&change);
             changes.push(change);
         }

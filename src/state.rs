@@ -172,17 +172,20 @@ impl FolderState {
         ))
     }
 
+    /// Apply a remote entry, returning every change it produced: the entry
+    /// itself plus any descendant tombstones created when a file or symlink
+    /// replaces a directory. Returns an empty vec if the entry was not accepted.
     pub fn apply_remote_entry(
         &mut self,
         remote: Entry,
         object_tmp_path: Option<&Path>,
-    ) -> io::Result<Option<Change>> {
+    ) -> io::Result<Vec<Change>> {
         validate_remote_path(&remote.path)?;
         if !self.should_accept_remote(&remote) {
             if let Some(tmp) = object_tmp_path {
                 let _ = fs::remove_file(tmp);
             }
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         match remote.kind {
@@ -230,7 +233,7 @@ impl FolderState {
             new: remote,
         }];
         all_changes.extend(extra_changes);
-        Ok(Some(all_changes.remove(0)))
+        Ok(all_changes)
     }
 
     fn install_remote_file(&self, remote: &Entry, tmp_path: &Path) -> io::Result<()> {
@@ -918,7 +921,7 @@ mod tests {
             },
         };
 
-        let change = state.apply_remote_entry(remote, None).unwrap().unwrap();
+        let change = state.apply_remote_entry(remote, None).unwrap().remove(0);
 
         assert_eq!(change.verb(), "symlink new");
         assert_eq!(
@@ -954,7 +957,7 @@ mod tests {
             },
         };
 
-        state.apply_remote_entry(remote, None).unwrap().unwrap();
+        state.apply_remote_entry(remote, None).unwrap();
 
         let metadata = fs::symlink_metadata(tmp.path().join("remote-dir")).unwrap();
         assert_eq!(metadata.permissions().mode() & 0o777, 0o755);
@@ -988,7 +991,7 @@ mod tests {
             },
         };
 
-        let change = state.apply_remote_entry(remote, None).unwrap().unwrap();
+        let change = state.apply_remote_entry(remote, None).unwrap().remove(0);
 
         assert_eq!(change.verb(), "delete");
         assert!(!dir.exists());
@@ -1082,7 +1085,7 @@ mod tests {
         let change = state
             .apply_remote_entry(remote, Some(&tmp_path))
             .unwrap()
-            .unwrap();
+            .remove(0);
 
         assert_eq!(change.verb(), "file new");
         assert_eq!(fs::read(tmp.path().join("remote.txt")).unwrap(), bytes);
@@ -1149,8 +1152,16 @@ mod tests {
 
         let tmp_path = state.tmp_recv_path(&remote);
         fs::write(&tmp_path, bytes).unwrap();
-        state.apply_remote_entry(remote, Some(&tmp_path)).unwrap();
+        let changes = state.apply_remote_entry(remote, Some(&tmp_path)).unwrap();
 
+        // The descendant tombstone must be reported alongside the file entry,
+        // not silently dropped.
+        assert!(changes.iter().any(|c| c.path == "sub" && c.new.kind == EntryKind::File));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.path == "sub/a.txt" && c.new.kind == EntryKind::Tombstone)
+        );
         assert_eq!(fs::read(tmp.path().join("sub")).unwrap(), bytes);
         assert_eq!(state.entry("sub").unwrap().kind, EntryKind::File);
         assert_eq!(state.entry("sub/a.txt").unwrap().kind, EntryKind::Tombstone);
@@ -1278,7 +1289,7 @@ mod tests {
             },
         };
 
-        let change = state.apply_remote_entry(remote, None).unwrap().unwrap();
+        let change = state.apply_remote_entry(remote, None).unwrap().remove(0);
 
         assert_eq!(change.verb(), "delete");
         assert!(!tmp.path().join("gone.txt").exists());
