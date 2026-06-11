@@ -245,7 +245,7 @@ impl FolderState {
         fs::rename(tmp_path, &dest)?;
 
         #[cfg(unix)]
-        if let Some(m) = remote.mode {
+        if let Some(m) = sanitize_remote_mode(remote.mode) {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&dest, fs::Permissions::from_mode(m))?;
         }
@@ -256,7 +256,7 @@ impl FolderState {
     fn install_remote_dir(&self, remote: &Entry) -> io::Result<()> {
         let dest = self.root.join(&remote.path);
         install_remote_dir(&dest)?;
-        set_mode(&dest, remote.mode)
+        set_mode(&dest, sanitize_remote_mode(remote.mode))
     }
 
     fn install_remote_symlink(&self, remote: &Entry) -> io::Result<()> {
@@ -722,6 +722,14 @@ fn create_symlink(_target: &str, _dest: &Path) -> io::Result<()> {
     ))
 }
 
+/// Strip the setuid/setgid bits from a mode received from a peer before it is
+/// applied locally. Even within the trusted-member model, replicating these
+/// bits would let a member's data plant setuid/setgid files on every peer; the
+/// ordinary permission bits are preserved.
+fn sanitize_remote_mode(mode: Option<u32>) -> Option<u32> {
+    mode.map(|m| m & !0o6000)
+}
+
 fn validate_remote_path(path: &str) -> io::Result<()> {
     use crate::ignore::should_ignore_component;
 
@@ -929,6 +937,39 @@ mod tests {
             PathBuf::from("target.txt")
         );
         assert_eq!(state.entry("link.txt").unwrap().version.lamport, 10);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strips_setuid_setgid_from_remote_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = FolderState::new(tmp.path().to_path_buf(), "node-a".to_string()).unwrap();
+        let bytes = b"payload\n";
+        let remote = Entry {
+            path: "tool".to_string(),
+            kind: EntryKind::File,
+            content_hash: Some(*blake3::hash(bytes).as_bytes()),
+            symlink_target: None,
+            size: bytes.len() as u64,
+            mode: Some(0o6755),
+            version: Version {
+                lamport: 10,
+                origin: "node-b".to_string(),
+            },
+        };
+
+        let tmp_path = state.tmp_recv_path(&remote);
+        fs::write(&tmp_path, bytes).unwrap();
+        state.apply_remote_entry(remote, Some(&tmp_path)).unwrap();
+
+        let mode = fs::symlink_metadata(tmp.path().join("tool"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o6000, 0, "setuid/setgid bits must be stripped");
+        assert_eq!(mode & 0o777, 0o755, "permission bits must be preserved");
     }
 
     #[cfg(unix)]
