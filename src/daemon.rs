@@ -332,7 +332,9 @@ pub async fn run_sync(
                     }
                     rpc::RpcEvent::Announcement { peer, message } => {
                         tracing::debug!("announcement from {peer}");
-                        handle_announcement(peer, message, shared.clone()).await?;
+                        if let Err(err) = handle_announcement(peer, message, shared.clone()).await {
+                            tracing::warn!("announcement handling failed for peer {peer}: {err}");
+                        }
                     }
                 }
             }
