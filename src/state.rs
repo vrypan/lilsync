@@ -69,11 +69,20 @@ impl FolderState {
         cleanup_recv_files(&state_dir);
         let saved_lamport = load_saved_lamport(&state_dir);
         let gc_watermark = load_gc_watermark(&state_dir);
-        let saved_entries = load_saved_entries(&state_dir);
+        let saved_entries = load_saved_entries(&state_dir)?;
+        // The clock is persisted separately from the entries; if its file
+        // lags or is lost, trusting it would issue versions below ones
+        // peers already hold, silently blocking local changes. Never start
+        // below the highest version present in the loaded index.
+        let max_entry_lamport = saved_entries
+            .values()
+            .map(|entry| entry.version.lamport)
+            .max()
+            .unwrap_or(0);
         let mut state = Self {
             root,
             origin,
-            lamport: saved_lamport,
+            lamport: saved_lamport.max(max_entry_lamport),
             gc_watermark,
             entries: saved_entries,
             tree: TreeSnapshot::empty(),
@@ -510,13 +519,17 @@ impl FolderState {
 
     fn save_lamport(&self) {
         let path = self.root.join(STATE_DIR).join("lamport");
-        let _ = fs::write(path, self.lamport.to_le_bytes());
+        if let Err(err) = write_atomic(&path, &self.lamport.to_le_bytes()) {
+            tracing::warn!("failed to save lamport clock: {err}");
+        }
     }
 
     pub fn save_entries(&self) {
         let path = self.root.join(STATE_DIR).join("entries.bin");
-        if let Ok(bytes) = bincode::serialize(&self.entries) {
-            let _ = fs::write(path, bytes);
+        if let Ok(bytes) = bincode::serialize(&self.entries)
+            && let Err(err) = write_atomic(&path, &bytes)
+        {
+            tracing::warn!("failed to save entries index: {err}");
         }
     }
 
@@ -581,19 +594,31 @@ impl FolderState {
 
     fn save_gc_watermark(&self) {
         let path = self.root.join(STATE_DIR).join("gc-watermark.bin");
-        if let Ok(bytes) = bincode::serialize(&self.gc_watermark) {
-            let _ = fs::write(path, bytes);
+        if let Ok(bytes) = bincode::serialize(&self.gc_watermark)
+            && let Err(err) = write_atomic(&path, &bytes)
+        {
+            tracing::warn!("failed to save gc watermark: {err}");
         }
     }
 }
 
-fn load_saved_entries(state_dir: &Path) -> BTreeMap<String, Entry> {
+/// Write `bytes` to `path` atomically: write a sibling temp file, then
+/// rename over the destination, so readers never observe a truncated file.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)
+}
+
+fn load_saved_entries(state_dir: &Path) -> io::Result<BTreeMap<String, Entry>> {
     let path = state_dir.join("entries.bin");
-    let Some(bytes) = fs::read(&path).ok() else {
-        return BTreeMap::new();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(err) => return Err(err),
     };
     if let Ok(entries) = bincode::deserialize(&bytes) {
-        return entries;
+        return Ok(entries);
     }
     bincode::deserialize::<BTreeMap<String, LegacyEntry>>(&bytes)
         .map(|entries| {
@@ -602,11 +627,17 @@ fn load_saved_entries(state_dir: &Path) -> BTreeMap<String, Entry> {
                 .map(|(path, entry)| (path, entry.into_entry()))
                 .collect()
         })
-        .unwrap_or_default()
+        .map_err(|_| {
+            io::Error::other(format!(
+                "corrupt state index {}: refusing to start with an empty index \
+                 (deleting the file rebuilds it from disk, losing deletion history)",
+                path.display()
+            ))
+        })
 }
 
 pub fn load_stored_entries(root: &Path) -> io::Result<BTreeMap<String, Entry>> {
-    Ok(load_saved_entries(&root.join(STATE_DIR)))
+    load_saved_entries(&root.join(STATE_DIR))
 }
 
 fn cleanup_recv_files(state_dir: &Path) {
@@ -810,6 +841,45 @@ mod tests {
         assert_eq!(changes[0].new.kind, EntryKind::Tombstone);
         assert_eq!(changes[0].new.version.lamport, 3);
         assert_ne!(state.root_hash(), initial_hash);
+    }
+
+    #[test]
+    fn corrupt_entries_file_is_a_hard_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.txt"), "one").unwrap();
+        let state = FolderState::new(tmp.path().to_path_buf(), "node-a".to_string()).unwrap();
+        drop(state);
+
+        let entries_path = tmp.path().join(".lil").join("entries.bin");
+        fs::write(&entries_path, b"\xff\xff\xff").unwrap();
+
+        let err = FolderState::new(tmp.path().to_path_buf(), "node-a".to_string());
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("corrupt state index"));
+    }
+
+    #[test]
+    fn lamport_clock_never_falls_below_loaded_entry_versions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.txt");
+        fs::write(&file, "one").unwrap();
+
+        let state = FolderState::new(tmp.path().to_path_buf(), "node-a".to_string()).unwrap();
+        let max_before = state
+            .entries
+            .values()
+            .map(|e| e.version.lamport)
+            .max()
+            .unwrap();
+        drop(state);
+
+        fs::remove_file(tmp.path().join(".lil").join("lamport")).unwrap();
+
+        let mut state = FolderState::new(tmp.path().to_path_buf(), "node-a".to_string()).unwrap();
+        fs::write(&file, "two").unwrap();
+        let changes = state.rescan().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].new.version.lamport > max_before);
     }
 
     #[test]

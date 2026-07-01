@@ -286,7 +286,7 @@ fn save_peers_file(path: &Path, mut members: Vec<MemberEntry>) -> io::Result<()>
         members,
     };
     let json = serde_json::to_string_pretty(&file).map_err(io::Error::other)?;
-    fs::write(path, json)
+    crate::state::write_atomic(path, json.as_bytes())
 }
 
 fn next_lamport(members: &BTreeMap<String, MemberEntry>) -> u64 {
@@ -311,7 +311,7 @@ fn save_invites(path: &Path, invites: &[PendingInvite]) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(invites).map_err(io::Error::other)?;
-    fs::write(path, json)
+    crate::state::write_atomic(path, json.as_bytes())
 }
 
 fn hash_secret(secret: &str) -> String {
