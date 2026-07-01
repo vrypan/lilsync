@@ -138,7 +138,7 @@ pub fn status_cmd(folder: &Path) -> io::Result<()> {
         println!(
             "  {:8}  {}{}",
             format!("{:?}", member.status),
-            &member.id[..16],
+            member.id.get(..16).unwrap_or(&member.id),
             marker
         );
     }

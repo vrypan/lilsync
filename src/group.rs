@@ -173,6 +173,10 @@ impl GroupState {
         let mut removed_self = false;
 
         for entry in incoming {
+            if entry.id.parse::<NodeId>().is_err() {
+                tracing::warn!("ignoring member entry with invalid id");
+                continue;
+            }
             let apply = self
                 .members
                 .get(&entry.id)
@@ -360,6 +364,33 @@ mod tests {
             .unwrap();
         assert!(!update.changed);
         assert_eq!(update.active_peers, vec![peer]);
+    }
+
+    #[test]
+    fn merge_members_rejects_invalid_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = node(1);
+        let mut state =
+            GroupState::load_or_init(tmp.path().join("peers.json"), local).unwrap();
+
+        let update = state
+            .merge_members(vec![
+                MemberEntry {
+                    id: "short".to_string(),
+                    status: MemberStatus::Active,
+                    lamport: 5,
+                },
+                MemberEntry {
+                    id: node(2).to_string(),
+                    status: MemberStatus::Active,
+                    lamport: 6,
+                },
+            ])
+            .unwrap();
+
+        assert!(update.changed);
+        assert_eq!(update.active_peers, vec![node(2)]);
+        assert!(state.members().iter().all(|m| m.id != "short"));
     }
 
     #[test]
