@@ -203,7 +203,13 @@ pub async fn run_sync(
     let group = Arc::new(RwLock::new(GroupState::load_or_init(peers_path, local_id)?));
     let bootstrap = group.read().await.active_peers();
     let state = {
-        let s = FolderState::new(folder.clone(), local_origin.clone())?;
+        // The initial scan reads and may hash the whole folder; keep it off
+        // the async worker threads.
+        let folder = folder.clone();
+        let origin = local_origin.clone();
+        let s = tokio::task::spawn_blocking(move || FolderState::new(folder, origin))
+            .await
+            .map_err(io::Error::other)??;
         Arc::new(RwLock::new(s))
     };
     let root_reports = Arc::new(RwLock::new(RootReports::default()));
@@ -392,28 +398,40 @@ pub async fn apply_filesystem_paths(
     } else {
         "event-paths"
     };
+    // Scanning stats, hashes, and sleeps waiting for unstable files; run it
+    // on the blocking pool so a slow file cannot stall the async workers
+    // serving RPCs and announcements.
     let update = {
-        let mut state = state.write().await;
-        let before_state = state.root_hash();
-        let before_live = state.live_root_hash();
-        let result = if paths.is_empty() {
-            state.rescan()
-        } else {
-            state.apply_paths(paths)
-        };
-        match result {
-            Ok(changes) if changes.is_empty() => None,
-            Ok(changes) => {
-                print_changes(before_state, before_live, &state, &changes);
-                let snapshot = StateSnapshot::from_state(&state);
-                let hint = build_tree_hint(&state, &changes, &snapshot, local_origin);
-                Some((changes, snapshot, hint))
+        let state = Arc::clone(&state);
+        let local_origin = local_origin.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut state = state.blocking_write();
+            let before_state = state.root_hash();
+            let before_live = state.live_root_hash();
+            let result = if paths.is_empty() {
+                state.rescan()
+            } else {
+                state.apply_paths(paths)
+            };
+            match result {
+                Ok(changes) if changes.is_empty() => None,
+                Ok(changes) => {
+                    print_changes(before_state, before_live, &state, &changes);
+                    let snapshot = StateSnapshot::from_state(&state);
+                    let hint = build_tree_hint(&state, &changes, &snapshot, &local_origin);
+                    Some((changes, snapshot, hint))
+                }
+                Err(err) => {
+                    tracing::warn!("scan failed: {err}");
+                    None
+                }
             }
-            Err(err) => {
-                tracing::warn!("scan failed: {err}");
-                None
-            }
-        }
+        })
+        .await
+        .unwrap_or_else(|err| {
+            tracing::warn!("scan task failed: {err}");
+            None
+        })
     };
     let changes_count = update
         .as_ref()
