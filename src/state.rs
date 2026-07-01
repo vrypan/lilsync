@@ -13,7 +13,7 @@ use crate::entries::{
 };
 use crate::ignore::{IGNORE_FILE_NAME, STATE_DIR, load_ignore_patterns, should_ignore};
 use crate::scan::{
-    mode, normalize_event_path, observe_file_when_stable, relative_path, scan_dir, scan_folder,
+    mode, normalize_event_path, relative_path, scan_dir, scan_folder,
 };
 use crate::tree::{
     TreeSnapshot, derive_live_tree, derive_tree, normalize_prefix, update_tree_snapshot,
@@ -59,6 +59,7 @@ pub struct FolderState {
     entries: BTreeMap<String, Entry>,
     tree: TreeSnapshot,
     live_tree: TreeSnapshot,
+    scan_cache: crate::scan::ScanCache,
 }
 
 impl FolderState {
@@ -79,6 +80,7 @@ impl FolderState {
             .map(|entry| entry.version.lamport)
             .max()
             .unwrap_or(0);
+        let scan_cache = crate::scan::ScanCache::load(&state_dir);
         let mut state = Self {
             root,
             origin,
@@ -87,6 +89,7 @@ impl FolderState {
             entries: saved_entries,
             tree: TreeSnapshot::empty(),
             live_tree: TreeSnapshot::empty(),
+            scan_cache,
         };
         if state.prune_tombstones_covered_by_watermark() > 0 {
             state.save_entries();
@@ -317,7 +320,7 @@ impl FolderState {
 
     pub fn rescan(&mut self) -> io::Result<Vec<Change>> {
         let ignore_patterns = load_ignore_patterns(&self.root)?;
-        let live = scan_folder(&self.root)?;
+        let live = scan_folder(&self.root, &mut self.scan_cache)?;
         let mut changes = Vec::new();
         let mut seen = live.unstable;
 
@@ -325,6 +328,9 @@ impl FolderState {
             seen.insert(path.clone());
             self.update_entry(&path, live_entry, &mut changes);
         }
+
+        self.scan_cache.retain_paths(&seen);
+        self.scan_cache.save(&self.root.join(STATE_DIR));
 
         let old_paths: Vec<String> = self.entries.keys().cloned().collect();
         for path in old_paths {
@@ -379,6 +385,8 @@ impl FolderState {
             self.apply_one_path(&abs_path, &relative, &ignore_patterns, &mut changes)?;
         }
 
+        self.scan_cache.save(&self.root.join(STATE_DIR));
+
         if !changes.is_empty() {
             let changed_paths: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
             update_tree_snapshot(&mut self.tree, &self.entries, &changed_paths, |_| true);
@@ -419,7 +427,14 @@ impl FolderState {
                 }
             }
             Ok(metadata) if metadata.is_file() => {
-                let Some(observed) = observe_file_when_stable(abs_path, metadata, true)? else {
+                let Some(observed) = crate::scan::observe_file_cached(
+                    abs_path,
+                    relative,
+                    metadata,
+                    true,
+                    &mut self.scan_cache,
+                )?
+                else {
                     tracing::debug!("file still changing; skipping {relative}");
                     return Ok(());
                 };
@@ -453,6 +468,7 @@ impl FolderState {
                     ignore_patterns,
                     &mut dir_entries,
                     &mut unstable,
+                    &mut self.scan_cache,
                 )?;
                 for (path, live) in dir_entries {
                     self.update_entry(&path, live, changes);
