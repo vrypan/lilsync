@@ -184,10 +184,47 @@ impl FolderState {
     /// Apply a remote entry, returning every change it produced: the entry
     /// itself plus any descendant tombstones created when a file or symlink
     /// replaces a directory. Returns an empty vec if the entry was not accepted.
+    /// Production callers batch via `apply_remote_entries`; this single-entry
+    /// form is kept for tests.
+    #[cfg(test)]
     pub fn apply_remote_entry(
         &mut self,
         remote: Entry,
         object_tmp_path: Option<&Path>,
+    ) -> io::Result<Vec<Change>> {
+        self.apply_remote_entries(vec![(remote, object_tmp_path.map(Path::to_path_buf))])
+    }
+
+    /// Apply a batch of remote entries in order, then update the trees and
+    /// persist the index once. Equivalent to sequential `apply_remote_entry`
+    /// calls but with one tree update and one save for the whole batch.
+    pub fn apply_remote_entries(
+        &mut self,
+        batch: Vec<(Entry, Option<PathBuf>)>,
+    ) -> io::Result<Vec<Change>> {
+        let mut all_changes = Vec::new();
+        let mut changed_paths = Vec::new();
+        for (remote, tmp) in batch {
+            let changes =
+                self.apply_remote_entry_core(remote, tmp.as_deref(), &mut changed_paths)?;
+            all_changes.extend(changes);
+        }
+        if !changed_paths.is_empty() {
+            update_tree_snapshot(&mut self.tree, &self.entries, &changed_paths, |_| true);
+            update_tree_snapshot(&mut self.live_tree, &self.entries, &changed_paths, |e| {
+                e.kind != EntryKind::Tombstone
+            });
+            self.save_lamport();
+            self.save_entries();
+        }
+        Ok(all_changes)
+    }
+
+    fn apply_remote_entry_core(
+        &mut self,
+        remote: Entry,
+        object_tmp_path: Option<&Path>,
+        changed_paths: &mut Vec<String>,
     ) -> io::Result<Vec<Change>> {
         validate_remote_path(&remote.path)?;
         if !self.should_accept_remote(&remote) {
@@ -226,15 +263,9 @@ impl FolderState {
         if remote.kind != EntryKind::Dir {
             self.tombstone_child_descendants(&path, &mut extra_changes);
         }
-        self.save_lamport();
-        self.save_entries();
 
-        let mut changed_paths: Vec<String> = vec![path.clone()];
+        changed_paths.push(path.clone());
         changed_paths.extend(extra_changes.iter().map(|c| c.path.clone()));
-        update_tree_snapshot(&mut self.tree, &self.entries, &changed_paths, |_| true);
-        update_tree_snapshot(&mut self.live_tree, &self.entries, &changed_paths, |e| {
-            e.kind != EntryKind::Tombstone
-        });
 
         let mut all_changes = vec![Change {
             path,
@@ -979,6 +1010,61 @@ mod tests {
         assert_eq!(link.symlink_target.as_deref(), Some("target.txt"));
         assert_eq!(link.content_hash, None);
         assert_eq!(link.size, 0);
+    }
+
+    #[test]
+    fn batch_apply_matches_sequential_applies() {
+        let remote_entries = || {
+            vec![
+                Entry {
+                    path: "docs".to_string(),
+                    kind: EntryKind::Dir,
+                    content_hash: None,
+                    symlink_target: None,
+                    size: 0,
+                    mode: None,
+                    version: Version {
+                        lamport: 10,
+                        origin: "node-b".to_string(),
+                    },
+                },
+                Entry {
+                    path: "sub/a.txt".to_string(),
+                    kind: EntryKind::Tombstone,
+                    content_hash: None,
+                    symlink_target: None,
+                    size: 0,
+                    mode: None,
+                    version: Version {
+                        lamport: 11,
+                        origin: "node-b".to_string(),
+                    },
+                },
+            ]
+        };
+
+        let make_folder = || {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::create_dir(tmp.path().join("sub")).unwrap();
+            fs::write(tmp.path().join("sub/a.txt"), "local").unwrap();
+            let state =
+                FolderState::new(tmp.path().to_path_buf(), "node-a".to_string()).unwrap();
+            (tmp, state)
+        };
+
+        let (_tmp_a, mut sequential) = make_folder();
+        let (_tmp_b, mut batched) = make_folder();
+        assert_eq!(sequential.root_hash(), batched.root_hash());
+
+        for entry in remote_entries() {
+            sequential.apply_remote_entry(entry, None).unwrap();
+        }
+        let batch = remote_entries().into_iter().map(|e| (e, None)).collect();
+        batched.apply_remote_entries(batch).unwrap();
+
+        assert_eq!(sequential.entries, batched.entries);
+        assert_eq!(sequential.root_hash(), batched.root_hash());
+        assert_eq!(sequential.live_root_hash(), batched.live_root_hash());
     }
 
     #[cfg(unix)]

@@ -90,6 +90,21 @@ pub(crate) fn update_tree_snapshot(
         }
     }
 
+    // Key-only child index over existing nodes plus every dirty path (dirty
+    // paths may be inserted as new nodes during the pass below). Hashes are
+    // read from the live snapshot so children updated or removed earlier in
+    // the bottom-up walk are observed correctly.
+    let mut child_keys: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for key in snapshot.nodes.keys().chain(dirty.iter()) {
+        if key.is_empty() {
+            continue;
+        }
+        child_keys
+            .entry(parent_path(key))
+            .or_default()
+            .insert(key.clone());
+    }
+
     for node_path in dirty.iter().rev() {
         let direct_entries: BTreeMap<String, [u8; 32]> = by_parent
             .get(node_path)
@@ -100,12 +115,14 @@ pub(crate) fn update_tree_snapshot(
             })
             .unwrap_or_default();
 
-        let direct_children: BTreeMap<String, [u8; 32]> = snapshot
-            .nodes
-            .iter()
-            .filter(|(k, _)| !k.is_empty() && &parent_path(k) == node_path)
-            .map(|(k, v)| (basename(k), v.hash))
-            .collect();
+        let direct_children: BTreeMap<String, [u8; 32]> = child_keys
+            .get(node_path)
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|k| snapshot.nodes.get(k).map(|v| (basename(k), v.hash)))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         if node_path.is_empty() || !direct_entries.is_empty() || !direct_children.is_empty() {
             let prefix = display_prefix(node_path);
@@ -170,18 +187,25 @@ fn derive_tree_with(
         }
     }
 
+    let mut children_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for candidate in &node_paths {
+        if candidate.is_empty() {
+            continue;
+        }
+        children_of
+            .entry(parent_path(candidate))
+            .or_default()
+            .push(candidate.clone());
+    }
+
     let mut hashes = BTreeMap::new();
     for path in node_paths.iter().rev() {
-        let child_paths: Vec<String> = node_paths
-            .iter()
-            .filter(|candidate| parent_path(candidate) == *path && !candidate.is_empty())
-            .cloned()
-            .collect();
+        let child_paths: &[String] = children_of.get(path).map(|v| v.as_slice()).unwrap_or(&[]);
 
         let mut children = BTreeMap::new();
         for child in child_paths {
-            if let Some(hash) = hashes.get(&child) {
-                children.insert(basename(&child), *hash);
+            if let Some(hash) = hashes.get(child) {
+                children.insert(basename(child), *hash);
             }
         }
 

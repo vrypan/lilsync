@@ -311,6 +311,7 @@ async fn reconcile_entries(
     let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
     let mut join_set: JoinSet<io::Result<(crate::state::Entry, Option<PathBuf>)>> = JoinSet::new();
 
+    let mut non_file_batch: Vec<(crate::state::Entry, Option<PathBuf>)> = Vec::new();
     for entry in to_apply {
         if entry.kind == EntryKind::File {
             let content_hash = entry.content_hash.ok_or_else(|| {
@@ -337,22 +338,30 @@ async fn reconcile_entries(
                 Ok((entry, tmp_path))
             });
         } else {
-            let mut state = ctx.state.write().await;
-            for change in state.apply_remote_entry(entry, None)? {
-                log_applied(&change);
-                changes.push(change);
-            }
+            non_file_batch.push((entry, None));
+        }
+    }
+    if !non_file_batch.is_empty() {
+        let mut state = ctx.state.write().await;
+        for change in state.apply_remote_entries(non_file_batch)? {
+            log_applied(&change);
+            changes.push(change);
         }
     }
 
-    // Phase 3: apply file entries as their downloads complete.
+    // Phase 3: collect file entries as their downloads complete, then apply
+    // them in one batch (one tree update and one index save per node).
+    let mut file_batch: Vec<(crate::state::Entry, Option<PathBuf>)> = Vec::new();
     while let Some(result) = join_set.join_next().await {
         let (entry, tmp_path) = result.map_err(io::Error::other)??;
         let Some(tmp_path) = tmp_path else {
             continue;
         };
+        file_batch.push((entry, Some(tmp_path)));
+    }
+    if !file_batch.is_empty() {
         let mut state = ctx.state.write().await;
-        for change in state.apply_remote_entry(entry, Some(&tmp_path))? {
+        for change in state.apply_remote_entries(file_batch)? {
             log_applied(&change);
             changes.push(change);
         }
