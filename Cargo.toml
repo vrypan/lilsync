@@ -1,6 +1,6 @@
 [package]
 name = "lilsync"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 rust-version = "1.94.1"
 description = "a little tool to sync your files"
