@@ -175,12 +175,17 @@ impl FolderState {
 
     pub fn tmp_recv_path(&self, entry: &Entry) -> PathBuf {
         let id = NEXT_RECV_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        // Hash the entry path instead of embedding it verbatim: a long
+        // remote path (or many nested components) would otherwise produce a
+        // temp filename exceeding the filesystem's per-component length
+        // limit (ENAMETOOLONG).
+        let path_hash = blake3::hash(entry.path.as_bytes()).to_hex();
         self.root.join(STATE_DIR).join(format!(
             "recv-{}-{}-{}-{}",
             std::process::id(),
             id,
             entry.version.lamport,
-            entry.path.replace('/', "_")
+            &path_hash[..16]
         ))
     }
 
