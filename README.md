@@ -179,6 +179,12 @@ being tracked locally; they are **not** deleted on remote peers.
 - Empty directories are not tracked. If the last file in a directory is
   deleted, the empty directory is removed on peers.
 
+## Running as a systemd Service
+
+See [deploy/systemd/README.md](deploy/systemd/README.md) for running
+`lilsync` under systemd, including named instances for syncing multiple
+folders.
+
 ## Debugging
 
 Use `lilsync watch` to keep the daemon in the foreground. Log verbosity is

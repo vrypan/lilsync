@@ -1,0 +1,15 @@
+[Unit]
+Description=lilsync folder sync daemon (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=youruser
+EnvironmentFile=/etc/lilsync/%i.conf
+ExecStart=/usr/local/bin/lilsync watch ${LILSYNC_FOLDER}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

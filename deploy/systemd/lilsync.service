@@ -1,0 +1,14 @@
+[Unit]
+Description=lilsync folder sync daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=youruser
+ExecStart=/usr/local/bin/lilsync watch /path/to/folder
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
