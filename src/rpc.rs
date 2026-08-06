@@ -2,7 +2,7 @@
 //! requests (root, node, entry, object, peers, join, announce); the client
 //! drives sync and gossip on behalf of the daemon.
 
-use crate::discovery::AddressBook;
+use crate::endpoints::AddressBook;
 use crate::group::{self, GroupState, MemberEntry};
 use crate::identity::{Identity, NodeId};
 use crate::protocol::{RequestMessage, ResponseMessage};
@@ -72,6 +72,9 @@ pub enum RpcEvent {
     Announcement {
         peer: NodeId,
         message: crate::message::GossipMessage,
+        /// IP the peer's connection was observed from; combined with the
+        /// peer's advertised listen port to learn a routable endpoint.
+        source_ip: std::net::IpAddr,
     },
 }
 
@@ -325,33 +328,50 @@ impl RpcClient {
     }
 
     async fn connect(&self, peer: NodeId) -> io::Result<NoiseConnection> {
-        let addr = self.wait_for_addr(peer).await?;
-        let conn = rpc_timeout(
-            CONNECT_TIMEOUT,
-            "connect",
-            peer,
-            NoiseConnection::connect(addr, &self.identity),
-        )
-        .await?;
-        if conn.peer() != peer {
-            return Err(io::Error::other(format!(
-                "connected to {addr}, expected {peer}, got {}",
-                conn.peer()
-            )));
+        let endpoints = self.wait_for_endpoints(peer).await?;
+        let mut last_err = io::Error::other(format!("no endpoints known for peer {peer}"));
+        for endpoint in &endpoints {
+            let conn = rpc_timeout(
+                CONNECT_TIMEOUT,
+                "connect",
+                peer,
+                NoiseConnection::connect(endpoint, &self.identity),
+            )
+            .await;
+            match conn {
+                Ok(conn) if conn.peer() == peer => return Ok(conn),
+                Ok(conn) => {
+                    last_err = io::Error::other(format!(
+                        "connected to {endpoint}, expected {peer}, got {}",
+                        conn.peer()
+                    ));
+                }
+                Err(err) => {
+                    tracing::debug!("connect peer={peer} endpoint={endpoint} failed: {err}");
+                    last_err = err;
+                }
+            }
         }
-        Ok(conn)
+        Err(last_err)
     }
 
-    async fn wait_for_addr(&self, peer: NodeId) -> io::Result<SocketAddr> {
+    async fn wait_for_endpoints(&self, peer: NodeId) -> io::Result<Vec<String>> {
         let deadline = Instant::now() + DISCOVERY_TIMEOUT;
         loop {
-            if let Some(addr) = self.addresses.read().await.get(&peer).map(|i| i.addr) {
-                return Ok(addr);
+            let endpoints = self
+                .addresses
+                .read()
+                .await
+                .get(&peer)
+                .map(|info| info.endpoints.clone())
+                .unwrap_or_default();
+            if !endpoints.is_empty() {
+                return Ok(endpoints);
             }
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!("peer {peer} not discovered by mDNS"),
+                    format!("no known address for peer {peer}"),
                 ));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -365,8 +385,14 @@ pub async fn spawn_server(
     group: Arc<RwLock<GroupState>>,
     invites_path: PathBuf,
     events: mpsc::UnboundedSender<RpcEvent>,
+    port: u16,
 ) -> io::Result<(u16, tokio::task::JoinHandle<()>)> {
-    let listener = TcpListener::bind(("0.0.0.0", 0)).await?;
+    let listener = TcpListener::bind(("0.0.0.0", port)).await.map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("could not bind RPC listener on port {port}: {err}"),
+        )
+    })?;
     let port = listener.local_addr()?.port();
     let handle = tokio::spawn(async move {
         loop {
@@ -425,8 +451,16 @@ async fn handle_connection(
         {
             handle_get_object(&mut conn, request_id, content_hash, peer, &state, &group).await?;
         } else {
-            let response =
-                handle_request(request, peer, &state, &group, &invites_path, &events).await;
+            let response = handle_request(
+                request,
+                peer,
+                addr.ip(),
+                &state,
+                &group,
+                &invites_path,
+                &events,
+            )
+            .await;
             conn.send_json(&response).await?;
         }
     }
@@ -521,6 +555,7 @@ async fn check_known_member(
 async fn handle_request(
     request: RequestMessage,
     peer: NodeId,
+    source_ip: std::net::IpAddr,
     state: &Arc<RwLock<FolderState>>,
     group: &Arc<RwLock<GroupState>>,
     invites_path: &Path,
@@ -629,7 +664,11 @@ async fn handle_request(
             if let Err(e) = check_member(group, peer, request_id).await {
                 return e;
             }
-            let _ = events.send(RpcEvent::Announcement { peer, message });
+            let _ = events.send(RpcEvent::Announcement {
+                peer,
+                message,
+                source_ip,
+            });
             ResponseMessage::Ok { request_id }
         }
         RequestMessage::GetObject { .. } => unreachable!("handled before handle_request"),

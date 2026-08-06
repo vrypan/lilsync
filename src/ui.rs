@@ -1,7 +1,7 @@
 //! Terminal output: the live status view, change/peer/state log helpers, and
 //! the `StateSnapshot` and `StatusState` types shared with the daemon.
 
-use crate::discovery::AddressBook;
+use crate::endpoints::AddressBook;
 use crate::group::{GroupState, MemberStatus};
 use crate::identity::NodeId;
 use crate::message::GossipMessage;
@@ -251,6 +251,15 @@ pub fn print_remote_message(message: &GossipMessage, state: &StateSnapshot) {
         GossipMessage::Peers { origin, members } => {
             tracing::info!("peer list origin={} members={}", origin, members.len());
         }
+        GossipMessage::Endpoints {
+            origin, endpoints, ..
+        } => {
+            tracing::info!(
+                "peer endpoints origin={} endpoints={}",
+                origin,
+                endpoints.join(",")
+            );
+        }
     }
 }
 
@@ -276,6 +285,11 @@ pub fn summarize_message(message: &GossipMessage) -> String {
         }
         GossipMessage::Peers { origin, members } => {
             format!("peers origin={origin} members={}", members.len())
+        }
+        GossipMessage::Endpoints {
+            origin, endpoints, ..
+        } => {
+            format!("endpoints origin={origin} count={}", endpoints.len())
         }
     }
 }

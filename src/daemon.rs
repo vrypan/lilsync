@@ -2,6 +2,7 @@
 //! announcement fanout, remote reconciliation dispatch, and GC triggering.
 
 use crate::commands::{INVITES_FILE, KEY_FILE, PEERS_FILE, acquire_daemon_lock};
+use crate::endpoints::{self, AddressBook};
 use crate::group::{GroupState, MemberEntry, MemberStatus};
 use crate::identity::{Identity, NodeId};
 use crate::message::{GossipMessage, TreeHint};
@@ -67,6 +68,8 @@ pub struct DaemonShared {
     pub status: Arc<StatusState>,
     pub publisher: RpcClient,
     pub local_origin: String,
+    pub address_book: AddressBook,
+    pub state_dir: PathBuf,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -187,6 +190,7 @@ pub async fn run_sync(
     interval_ms: u64,
     announce_interval_secs: u64,
     status: bool,
+    port: Option<u16>,
 ) -> io::Result<()> {
     fs::create_dir_all(&folder)?;
 
@@ -223,21 +227,27 @@ pub async fn run_sync(
     let watch_root = state.read().await.root().to_path_buf();
     let _watcher = watcher::spawn(watch_root, interval_ms, poll, fs_tx)?;
 
-    let address_book = crate::discovery::new_address_book();
+    let address_book = endpoints::new_address_book();
+    {
+        let stored = endpoints::load_address_book(&state_dir);
+        if !stored.is_empty() {
+            tracing::info!("loaded {} peer endpoints", stored.len());
+            *address_book.write().await = stored;
+        }
+    }
+    // Reuse the last listen port so gossiped endpoints stay valid across
+    // restarts; --port overrides and becomes the new persisted port.
+    let requested_port = port.or_else(|| endpoints::load_port(&state_dir)).unwrap_or(0);
     let (rpc_port, _rpc_server) = rpc::spawn_server(
         Arc::clone(&identity),
         Arc::clone(&state),
         Arc::clone(&group),
         invites_path,
         rpc_event_tx,
+        requested_port,
     )
     .await?;
-    let mdns = crate::discovery::spawn(
-        local_id,
-        rpc_port,
-        name.as_deref(),
-        Arc::clone(&address_book),
-    )?;
+    endpoints::save_port(&state_dir, rpc_port)?;
     let rpc_client = RpcClient::new(Arc::clone(&identity), Arc::clone(&address_book));
     let shared = DaemonShared {
         state: Arc::clone(&state),
@@ -249,6 +259,8 @@ pub async fn run_sync(
         status: Arc::clone(&status_state),
         publisher: rpc_client.clone(),
         local_origin: local_origin.clone(),
+        address_book: Arc::clone(&address_book),
+        state_dir: state_dir.clone(),
     };
 
     {
@@ -267,6 +279,14 @@ pub async fn run_sync(
         .await;
     }
     publish_peers(&rpc_client, Arc::clone(&group), &local_origin).await;
+    publish_endpoints(
+        &rpc_client,
+        Arc::clone(&group),
+        &local_origin,
+        rpc_port,
+        name.as_deref(),
+    )
+    .await;
     request_peer_lists(
         rpc_client.clone(),
         Arc::clone(&group),
@@ -312,7 +332,6 @@ pub async fn run_sync(
         tokio::select! {
             _ = &mut shutdown => {
                 tracing::info!("shutdown signal received");
-                mdns.announce_removal().await;
                 return Ok(());
             }
             Some(paths) = fs_rx.recv() => {
@@ -335,10 +354,20 @@ pub async fn run_sync(
                     rpc::RpcEvent::PeerJoined { peer } => {
                         tracing::info!("peer joined {peer}");
                         publish_peers(&rpc_client, Arc::clone(&group), &local_origin).await;
+                        publish_endpoints(
+                            &rpc_client,
+                            Arc::clone(&group),
+                            &local_origin,
+                            rpc_port,
+                            name.as_deref(),
+                        )
+                        .await;
                     }
-                    rpc::RpcEvent::Announcement { peer, message } => {
+                    rpc::RpcEvent::Announcement { peer, message, source_ip } => {
                         tracing::debug!("announcement from {peer}");
-                        if let Err(err) = handle_announcement(peer, message, shared.clone()).await {
+                        if let Err(err) =
+                            handle_announcement(peer, message, source_ip, shared.clone()).await
+                        {
                             tracing::warn!("announcement handling failed for peer {peer}: {err}");
                         }
                     }
@@ -359,6 +388,14 @@ pub async fn run_sync(
                 };
                 if publish_tracker.should_publish_peers(&members) {
                     publish_peers(&rpc_client, Arc::clone(&group), &local_origin).await;
+                    publish_endpoints(
+                        &rpc_client,
+                        Arc::clone(&group),
+                        &local_origin,
+                        rpc_port,
+                        name.as_deref(),
+                    )
+                    .await;
                     publish_tracker.mark_peers(&members);
                 }
             }
@@ -481,6 +518,22 @@ async fn publish_filesystem_changed(
         live_root: state.live_root,
         lamport: state.lamport,
         hint,
+    };
+    publish(rpc_client, group, message).await;
+}
+
+async fn publish_endpoints(
+    rpc_client: &RpcClient,
+    group: Arc<RwLock<GroupState>>,
+    origin: &str,
+    listen_port: u16,
+    name: Option<&str>,
+) {
+    let message = GossipMessage::Endpoints {
+        origin: origin.to_string(),
+        listen_port,
+        endpoints: endpoints::local_endpoints(listen_port),
+        name: name.map(str::to_string),
     };
     publish(rpc_client, group, message).await;
 }
@@ -632,6 +685,7 @@ async fn publish(rpc_client: &RpcClient, group: Arc<RwLock<GroupState>>, message
 async fn handle_announcement(
     peer: NodeId,
     message: GossipMessage,
+    source_ip: std::net::IpAddr,
     shared: DaemonShared,
 ) -> io::Result<()> {
     // The announcement's self-asserted origin must match the cryptographically
@@ -669,6 +723,32 @@ async fn handle_announcement(
     print_remote_message(&message, &local);
     record_root_report(Arc::clone(&shared.root_reports), &message).await;
     match &message {
+        GossipMessage::Endpoints {
+            listen_port,
+            endpoints: advertised,
+            name,
+            ..
+        } => {
+            // The address the peer actually reached us from, paired with its
+            // advertised listen port, is the most likely routable endpoint;
+            // it goes first in the candidate list.
+            let observed = endpoints::format_endpoint(source_ip, *listen_port);
+            let changed = endpoints::merge_peer_endpoints(
+                &shared.address_book,
+                peer,
+                Some(observed),
+                advertised,
+                name.clone(),
+            )
+            .await;
+            if changed {
+                tracing::info!("endpoints updated for {peer}");
+                let book = shared.address_book.read().await.clone();
+                if let Err(err) = endpoints::save_address_book(&shared.state_dir, &book) {
+                    tracing::warn!("could not persist endpoints: {err}");
+                }
+            }
+        }
         GossipMessage::Peers { members, .. } => {
             let update = shared.group.write().await.merge_members(members.clone())?;
             if update.changed {
@@ -701,7 +781,9 @@ async fn is_active_origin(group: &Arc<RwLock<GroupState>>, origin: &str) -> bool
 fn message_gc_watermark(message: &GossipMessage) -> Option<&GcWatermark> {
     match message {
         GossipMessage::SyncState { gc_watermark, .. } => Some(gc_watermark),
-        GossipMessage::FilesystemChanged { .. } | GossipMessage::Peers { .. } => None,
+        GossipMessage::FilesystemChanged { .. }
+        | GossipMessage::Peers { .. }
+        | GossipMessage::Endpoints { .. } => None,
     }
 }
 
@@ -757,7 +839,7 @@ fn root_report_from_message(message: &GossipMessage) -> Option<(String, RootRepo
                 lamport: *lamport,
             },
         )),
-        GossipMessage::Peers { .. } => None,
+        GossipMessage::Peers { .. } | GossipMessage::Endpoints { .. } => None,
     }
 }
 
@@ -815,7 +897,7 @@ fn maybe_probe_remote_rpc(rpc_client: RpcClient, message: GossipMessage, shared:
                 hint,
                 ..
             } => (origin, state_root, live_root, lamport, hint, true),
-            GossipMessage::Peers { .. } => return,
+            GossipMessage::Peers { .. } | GossipMessage::Endpoints { .. } => return,
         };
     let Ok(peer) = origin.parse::<NodeId>() else {
         tracing::warn!("cannot RPC probe peer with invalid origin {origin}");

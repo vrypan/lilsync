@@ -4,7 +4,7 @@
 mod cli;
 mod commands;
 mod daemon;
-mod discovery;
+mod endpoints;
 mod entries;
 mod group;
 mod identity;
@@ -23,8 +23,8 @@ mod watcher;
 
 use crate::cli::{Cli, Command};
 use crate::commands::{
-    KEY_FILE, PEERS_FILE, PID_FILE, create_invite, daemonize, dump_state_cmd, join_group,
-    peers_cmd, remove_peer_cmd, scan_cmd, status_cmd, stop_cmd,
+    KEY_FILE, PID_FILE, create_invite, daemonize, dump_state_cmd, join_group, peers_cmd,
+    remove_peer_cmd, status_cmd, stop_cmd,
 };
 use crate::daemon::run_sync;
 use clap::Parser;
@@ -75,11 +75,12 @@ async fn run(cli: Cli) -> io::Result<()> {
         Command::Invite {
             folder,
             expire_secs,
+            endpoint,
         } => {
             fs::create_dir_all(&folder)?;
             let state_dir = folder.join(".lil");
             fs::create_dir_all(&state_dir)?;
-            return create_invite(&state_dir, expire_secs);
+            return create_invite(&state_dir, expire_secs, &endpoint);
         }
         Command::Remove { folder, target } => {
             fs::create_dir_all(&folder)?;
@@ -92,10 +93,6 @@ async fn run(cli: Cli) -> io::Result<()> {
             let state_dir = folder.join(".lil");
             fs::create_dir_all(&state_dir)?;
             return peers_cmd(&state_dir);
-        }
-        Command::Scan { watch } => {
-            scan_cmd(watch).await?;
-            return Ok(());
         }
         Command::Status { folder } => {
             return status_cmd(&folder);
@@ -113,6 +110,7 @@ async fn run(cli: Cli) -> io::Result<()> {
             name,
             exit,
             status,
+            port,
         } => {
             fs::create_dir_all(&folder)?;
             let state_dir = folder.join(".lil");
@@ -120,14 +118,12 @@ async fn run(cli: Cli) -> io::Result<()> {
             let identity = Arc::new(crate::identity::Identity::load_or_create(
                 &state_dir.join(KEY_FILE),
             )?);
-            let address_book = discovery::new_address_book();
-            let _mdns = discovery::spawn_browser(identity.node_id(), Arc::clone(&address_book))?;
-            let peers_path = state_dir.join(PEERS_FILE);
-            join_group(Arc::clone(&identity), address_book, &peers_path, &ticket).await?;
+            let address_book = endpoints::new_address_book();
+            join_group(Arc::clone(&identity), address_book, &state_dir, &ticket).await?;
             if exit {
                 return Ok(());
             }
-            run_sync(folder, name, false, 500, 10, status).await?;
+            run_sync(folder, name, false, 500, 10, status, port).await?;
         }
         Command::Start {
             folder,
@@ -135,6 +131,7 @@ async fn run(cli: Cli) -> io::Result<()> {
             poll,
             interval_ms,
             announce_interval_secs,
+            port,
         } => {
             run_sync(
                 folder,
@@ -143,6 +140,7 @@ async fn run(cli: Cli) -> io::Result<()> {
                 interval_ms,
                 announce_interval_secs,
                 false,
+                port,
             )
             .await?
         }
@@ -153,6 +151,7 @@ async fn run(cli: Cli) -> io::Result<()> {
             interval_ms,
             announce_interval_secs,
             status,
+            port,
         } => {
             run_sync(
                 folder,
@@ -161,6 +160,7 @@ async fn run(cli: Cli) -> io::Result<()> {
                 interval_ms,
                 announce_interval_secs,
                 status,
+                port,
             )
             .await?
         }

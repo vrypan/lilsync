@@ -64,6 +64,18 @@ run one instance per folder, identified by the `%i` instance name.
    ```
 
 Pass any extra flags (`--name`, `--poll`, `--interval-ms`,
-`--announce-interval-secs`) directly in `ExecStart`, or add them to the
-per-instance `.conf` file and reference them the same way as
+`--announce-interval-secs`, `--port`) directly in `ExecStart`, or add them to
+the per-instance `.conf` file and reference them the same way as
 `${LILSYNC_FOLDER}`.
+
+Each instance needs its own RPC listen port. By default lilsync picks a free
+port on first run and persists it in `<folder>/.lil/port`, so instances do
+not collide. To pin ports explicitly (e.g. for firewall rules), give each
+instance its own `--port`:
+
+```bash
+LILSYNC_FOLDER=/home/youruser/photos
+LILSYNC_OPTS=--port 7421
+```
+
+and use `ExecStart=/usr/local/bin/lilsync watch ${LILSYNC_FOLDER} $LILSYNC_OPTS`.

@@ -1,35 +1,60 @@
 //! One-shot CLI subcommand implementations: `invite`, `peers`, `remove`,
-//! `join`, `dump-state`, `scan`, and the per-folder daemon lock.
+//! `join`, `dump-state`, and the per-folder daemon lock.
 
 use crate::cli::{encode_ticket, parse_join_ticket};
-use crate::discovery::{AddressBook, PeerInfo};
+use crate::endpoints::{self, AddressBook, PeerInfo};
 use crate::group::{GroupState, add_invite, generate_secret, now_ms};
-use crate::identity::{Identity, NodeId};
+use crate::identity::Identity;
 use crate::rpc::RpcClient;
 use crate::state::{Entry, EntryKind, hex, load_stored_entries};
 use crate::tree::derive_tree;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 pub const KEY_FILE: &str = "private.key";
 pub const PEERS_FILE: &str = "peers.json";
 pub const INVITES_FILE: &str = "invites.json";
 pub const PID_FILE: &str = "daemon.pid";
 
-pub fn create_invite(state_dir: &Path, expire_secs: u64) -> io::Result<()> {
+pub fn create_invite(
+    state_dir: &Path,
+    expire_secs: u64,
+    endpoint_override: &[String],
+) -> io::Result<()> {
     let identity = Identity::load_or_create(&state_dir.join(KEY_FILE))?;
     let node_id = identity.node_id();
     let peers_path = state_dir.join(PEERS_FILE);
     let _group = GroupState::load_or_init(peers_path, node_id)?;
+    let ticket_endpoints = if endpoint_override.is_empty() {
+        let Some(port) = endpoints::load_port(state_dir) else {
+            return Err(io::Error::other(
+                "no listen port recorded for this folder; start the daemon once \
+                 (or pass --endpoint <host:port>) so the ticket can tell the \
+                 joining node where to connect",
+            ));
+        };
+        let detected = endpoints::local_endpoints(port);
+        if detected.is_empty() {
+            return Err(io::Error::other(
+                "could not detect any local addresses; pass --endpoint <host:port>",
+            ));
+        }
+        detected
+    } else {
+        endpoint_override.to_vec()
+    };
     let secret_bytes = generate_secret()?;
     let secret_hex = hex(secret_bytes);
     let expires_at = now_ms()? + expire_secs.saturating_mul(1000);
     add_invite(&state_dir.join(INVITES_FILE), &secret_hex, expires_at)?;
-    println!("{}", encode_ticket(node_id, &secret_bytes));
-    tracing::info!("invite expires in {}s", expire_secs);
+    println!("{}", encode_ticket(node_id, &secret_bytes, &ticket_endpoints)?);
+    tracing::info!(
+        "invite expires in {}s, endpoints {}",
+        expire_secs,
+        ticket_endpoints.join(",")
+    );
     Ok(())
 }
 
@@ -47,58 +72,6 @@ pub fn peers_cmd(state_dir: &Path) -> io::Result<()> {
         println!("{:?} {}{}", member.status, member.id, marker);
     }
     Ok(())
-}
-
-pub async fn scan_cmd(watch: bool) -> io::Result<()> {
-    let address_book = crate::discovery::new_address_book();
-    // Use a zero NodeId — we have no local identity, so nothing to filter out.
-    let _mdns =
-        crate::discovery::spawn_browser(NodeId::from_bytes([0; 32]), Arc::clone(&address_book))?;
-
-    if watch {
-        let frames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
-        let mut tick = 0usize;
-        loop {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => break,
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    render_scan(&address_book, Some(frames[tick % frames.len()])).await;
-                    tick = tick.wrapping_add(1);
-                }
-            }
-        }
-    } else {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        render_scan(&address_book, None).await;
-    }
-    Ok(())
-}
-
-async fn render_scan(address_book: &AddressBook, spinner: Option<&str>) {
-    if let Some(s) = spinner {
-        print!("\x1b[2J\x1b[H");
-        println!("lilsync nodes on LAN  {s}");
-        println!();
-    }
-    let peers = address_book.read().await;
-    if peers.is_empty() {
-        println!("no peers found");
-        let _ = io::stdout().flush();
-        return;
-    }
-    println!("{:<64}  {:<16}  {:<6}  NAME", "ID", "IP", "PORT");
-    let mut sorted: Vec<(&NodeId, &PeerInfo)> = peers.iter().collect();
-    sorted.sort_by_key(|(id, _)| id.to_string());
-    for (id, info) in sorted {
-        println!(
-            "{:<64}  {:<16}  {:<6}  {}",
-            id.to_string(),
-            info.addr.ip(),
-            info.addr.port(),
-            info.name.as_deref().unwrap_or("-"),
-        );
-    }
-    let _ = io::stdout().flush();
 }
 
 pub fn status_cmd(folder: &Path) -> io::Result<()> {
@@ -243,15 +216,31 @@ pub fn remove_peer_cmd(state_dir: &Path, target: &str) -> io::Result<()> {
 pub async fn join_group(
     identity: Arc<Identity>,
     address_book: AddressBook,
-    peers_path: &Path,
+    state_dir: &Path,
     ticket: &str,
 ) -> io::Result<()> {
     let ticket = parse_join_ticket(ticket)?;
-    let rpc_client = RpcClient::new(Arc::clone(&identity), address_book);
+    if ticket.endpoints.is_empty() {
+        return Err(io::Error::other(
+            "ticket contains no endpoints; ask the inviter for a fresh one",
+        ));
+    }
+    address_book.write().await.insert(
+        ticket.issuer,
+        PeerInfo {
+            endpoints: ticket.endpoints.clone(),
+            name: None,
+        },
+    );
+    let rpc_client = RpcClient::new(Arc::clone(&identity), Arc::clone(&address_book));
     let members = rpc_client
         .join_group(ticket.issuer, ticket.secret, identity.node_id())
         .await?;
-    GroupState::replace(peers_path, members)?;
+    GroupState::replace(&state_dir.join(PEERS_FILE), members)?;
+    // Persist the issuer's endpoints so the daemon can reach it on the next
+    // start without a fresh ticket.
+    let book = address_book.read().await.clone();
+    endpoints::save_address_book(state_dir, &book)?;
     tracing::info!("joined group via {}", ticket.issuer);
     Ok(())
 }

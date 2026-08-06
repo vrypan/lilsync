@@ -32,8 +32,9 @@ pub struct NoiseConnection {
 }
 
 impl NoiseConnection {
-    pub async fn connect(addr: std::net::SocketAddr, identity: &Identity) -> io::Result<Self> {
-        let stream = TcpStream::connect(addr).await?;
+    /// Connect to a `host:port` endpoint; hostnames are resolved via DNS.
+    pub async fn connect(endpoint: &str, identity: &Identity) -> io::Result<Self> {
+        let stream = TcpStream::connect(endpoint).await?;
         let mut noise = snow::Builder::new(
             NOISE_PATTERN
                 .parse()

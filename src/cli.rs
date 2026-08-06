@@ -53,6 +53,9 @@ pub enum Command {
         /// How often to publish local root state
         #[arg(long, value_name = "SECONDS", default_value = "10")]
         announce_interval_secs: u64,
+        /// RPC listen port (persisted; defaults to the last used port)
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
     },
     /// Run the sync daemon in the foreground
     Watch {
@@ -73,6 +76,9 @@ pub enum Command {
         /// Show a quiet peer status view instead of regular info logs
         #[arg(long)]
         status: bool,
+        /// RPC listen port (persisted; defaults to the last used port)
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
     },
     /// Create a one-time join ticket and exit
     Invite {
@@ -81,6 +87,10 @@ pub enum Command {
         /// Ticket lifetime in seconds
         #[arg(long, value_name = "SECONDS", default_value = "3600")]
         expire_secs: u64,
+        /// Endpoint to embed in the ticket instead of the detected local
+        /// addresses (repeatable)
+        #[arg(long, value_name = "HOST:PORT")]
+        endpoint: Vec<String>,
     },
     /// Join a group using a ticket
     Join {
@@ -97,6 +107,9 @@ pub enum Command {
         /// Show a quiet peer status view after joining
         #[arg(long)]
         status: bool,
+        /// RPC listen port (persisted; defaults to the last used port)
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
     },
     /// Remove a peer by node ID or name
     Remove {
@@ -109,12 +122,6 @@ pub enum Command {
     Peers {
         /// Folder whose group to inspect
         folder: PathBuf,
-    },
-    /// Discover lilsync nodes advertised on the local network via mDNS
-    Scan {
-        /// Stay alive and refresh the list as peers appear or disappear
-        #[arg(long)]
-        watch: bool,
     },
     /// Show local sync state and peer list
     Status {
@@ -136,32 +143,79 @@ pub enum Command {
     },
 }
 
+#[derive(Debug)]
 pub struct JoinTicket {
     pub issuer: NodeId,
     pub secret: String,
+    /// Candidate `host:port` endpoints where the issuer is reachable.
+    pub endpoints: Vec<String>,
 }
+
+/// Ticket wire format, base62-encoded as one big-endian integer:
+/// `[version=2][issuer 32 bytes][secret 32 bytes][endpoints utf8]` where
+/// endpoints are comma-joined `host:port` strings. The leading version byte
+/// is non-zero, so the exact byte length survives the base62 round trip.
+const TICKET_VERSION: u8 = 2;
+const TICKET_MIN_BYTES: usize = 1 + 32 + 32;
+const TICKET_MAX_BYTES: usize = TICKET_MIN_BYTES + MAX_TICKET_ENDPOINT_BYTES;
+pub const MAX_TICKET_ENDPOINT_BYTES: usize = 384;
 
 pub fn parse_join_ticket(value: &str) -> io::Result<JoinTicket> {
     let bytes = ticket_base62_decode(value)?;
-    let issuer = NodeId::from_bytes(bytes[..32].try_into().unwrap());
-    let secret_arr: [u8; 32] = bytes[32..].try_into().unwrap();
+    if bytes.len() < TICKET_MIN_BYTES {
+        return Err(io::Error::other("invalid ticket: too short"));
+    }
+    if bytes[0] != TICKET_VERSION {
+        return Err(io::Error::other(format!(
+            "unsupported ticket version {} (this build expects {TICKET_VERSION}; \
+             tickets from older lilsync versions are not compatible)",
+            bytes[0]
+        )));
+    }
+    let issuer = NodeId::from_bytes(bytes[1..33].try_into().unwrap());
+    let secret_arr: [u8; 32] = bytes[33..65].try_into().unwrap();
     let secret = hex(secret_arr);
-    Ok(JoinTicket { issuer, secret })
+    let endpoints_raw = std::str::from_utf8(&bytes[65..])
+        .map_err(|_| io::Error::other("invalid ticket: endpoint list is not utf8"))?;
+    let endpoints = endpoints_raw
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok(JoinTicket {
+        issuer,
+        secret,
+        endpoints,
+    })
 }
 
-pub fn encode_ticket(node_id: NodeId, secret_bytes: &[u8; 32]) -> String {
-    let mut combined = [0u8; 64];
-    combined[..32].copy_from_slice(node_id.as_bytes());
-    combined[32..].copy_from_slice(secret_bytes);
-    ticket_base62_encode(&combined)
+pub fn encode_ticket(
+    node_id: NodeId,
+    secret_bytes: &[u8; 32],
+    endpoints: &[String],
+) -> io::Result<String> {
+    let joined = endpoints.join(",");
+    if joined.len() > MAX_TICKET_ENDPOINT_BYTES {
+        return Err(io::Error::other(format!(
+            "endpoint list too long for ticket ({} bytes, max {MAX_TICKET_ENDPOINT_BYTES})",
+            joined.len()
+        )));
+    }
+    let mut combined = Vec::with_capacity(TICKET_MIN_BYTES + joined.len());
+    combined.push(TICKET_VERSION);
+    combined.extend_from_slice(node_id.as_bytes());
+    combined.extend_from_slice(secret_bytes);
+    combined.extend_from_slice(joined.as_bytes());
+    Ok(ticket_base62_encode(&combined))
 }
 
 const BASE62_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-pub const TICKET_CHARS: usize = 86;
+// ceil(bytes * 8 / log2(62)) with headroom.
+const TICKET_MAX_CHARS: usize = TICKET_MAX_BYTES * 8 / 5;
 
-fn ticket_base62_encode(bytes: &[u8; 64]) -> String {
-    let mut n = *bytes;
-    let mut digits = Vec::with_capacity(TICKET_CHARS);
+fn ticket_base62_encode(bytes: &[u8]) -> String {
+    let mut n = bytes.to_vec();
+    let mut digits = Vec::new();
     loop {
         let rem = b62_divmod(&mut n);
         digits.push(BASE62_ALPHABET[rem as usize]);
@@ -169,22 +223,18 @@ fn ticket_base62_encode(bytes: &[u8; 64]) -> String {
             break;
         }
     }
-    while digits.len() < TICKET_CHARS {
-        digits.push(BASE62_ALPHABET[0]);
-    }
     digits.reverse();
     String::from_utf8(digits).unwrap()
 }
 
-fn ticket_base62_decode(s: &str) -> io::Result<[u8; 64]> {
-    if s.len() != TICKET_CHARS {
+fn ticket_base62_decode(s: &str) -> io::Result<Vec<u8>> {
+    if s.is_empty() || s.len() > TICKET_MAX_CHARS {
         return Err(io::Error::other(format!(
-            "invalid ticket: expected {} chars, got {}",
-            TICKET_CHARS,
+            "invalid ticket: unexpected length {}",
             s.len()
         )));
     }
-    let mut result = [0u8; 64];
+    let mut result = Vec::new();
     for &ch in s.as_bytes() {
         let digit = b62_char_to_digit(ch)?;
         b62_mul_add(&mut result, digit);
@@ -202,12 +252,18 @@ fn b62_divmod(bytes: &mut [u8]) -> u8 {
     rem as u8
 }
 
-fn b62_mul_add(bytes: &mut [u8], digit: u8) {
+/// Multiply the big-endian integer in `bytes` by 62 and add `digit`,
+/// growing the buffer when the value overflows its current width.
+fn b62_mul_add(bytes: &mut Vec<u8>, digit: u8) {
     let mut carry = digit as u32;
     for b in bytes.iter_mut().rev() {
         let val = *b as u32 * 62 + carry;
         *b = (val & 0xFF) as u8;
         carry = val >> 8;
+    }
+    while carry > 0 {
+        bytes.insert(0, (carry & 0xFF) as u8);
+        carry >>= 8;
     }
 }
 
@@ -231,10 +287,39 @@ mod tests {
     fn join_ticket_roundtrips() {
         let issuer = NodeId::from_bytes([7; 32]);
         let secret_bytes = [0xABu8; 32];
-        let ticket_str = encode_ticket(issuer, &secret_bytes);
-        assert_eq!(ticket_str.len(), TICKET_CHARS);
+        let endpoints = vec!["100.64.1.2:7420".to_string(), "[fd7a::1]:7420".to_string()];
+        let ticket_str = encode_ticket(issuer, &secret_bytes, &endpoints).unwrap();
         let parsed = parse_join_ticket(&ticket_str).unwrap();
         assert_eq!(parsed.issuer, issuer);
         assert_eq!(parsed.secret, hex(secret_bytes));
+        assert_eq!(parsed.endpoints, endpoints);
+    }
+
+    #[test]
+    fn join_ticket_roundtrips_with_leading_zero_node_id() {
+        let issuer = NodeId::from_bytes([0; 32]);
+        let secret_bytes = [0u8; 32];
+        let ticket_str = encode_ticket(issuer, &secret_bytes, &[]).unwrap();
+        let parsed = parse_join_ticket(&ticket_str).unwrap();
+        assert_eq!(parsed.issuer, issuer);
+        assert!(parsed.endpoints.is_empty());
+    }
+
+    #[test]
+    fn rejects_old_ticket_version() {
+        // A version-1 style ticket (no version byte) decodes to bytes whose
+        // first byte is almost never 2; craft one explicitly.
+        let mut bytes = vec![1u8];
+        bytes.extend_from_slice(&[9; 64]);
+        let ticket_str = ticket_base62_encode(&bytes);
+        let err = parse_join_ticket(&ticket_str).unwrap_err();
+        assert!(err.to_string().contains("unsupported ticket version"));
+    }
+
+    #[test]
+    fn rejects_oversized_endpoint_list() {
+        let issuer = NodeId::from_bytes([7; 32]);
+        let long = vec!["a".repeat(MAX_TICKET_ENDPOINT_BYTES + 1)];
+        assert!(encode_ticket(issuer, &[0; 32], &long).is_err());
     }
 }

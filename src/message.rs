@@ -1,6 +1,6 @@
 //! Gossip message types broadcast between peers: `SyncState` (full root
 //! snapshot), `FilesystemChanged` (incremental with optional tree hint),
-//! and `Peers` (member list).
+//! `Peers` (member list), and `Endpoints` (reachable addresses).
 
 use crate::group::MemberEntry;
 use crate::state::{GcWatermark, TreeNode};
@@ -29,6 +29,15 @@ pub enum GossipMessage {
         origin: String,
         members: Vec<MemberEntry>,
     },
+    Endpoints {
+        origin: String,
+        /// The sender's RPC listen port; receivers combine it with the
+        /// connection's observed source address.
+        listen_port: u16,
+        /// `host:port` endpoints the sender believes it is reachable at.
+        endpoints: Vec<String>,
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -52,6 +61,7 @@ impl GossipMessage {
             Self::SyncState { origin, .. } => origin,
             Self::FilesystemChanged { origin, .. } => origin,
             Self::Peers { origin, .. } => origin,
+            Self::Endpoints { origin, .. } => origin,
         }
     }
 }
