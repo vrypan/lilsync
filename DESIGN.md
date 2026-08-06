@@ -2,30 +2,32 @@
 
 ## Goal
 
-`lil` syncs a folder between a small, trusted group of nodes on the same LAN.
-Every node keeps a full copy of the folder and a full membership ledger.
+`lil` syncs a folder between a small, trusted group of nodes on a network
+where they can reach each other directly — a LAN, a Tailscale tailnet, or a
+VPN. Every node keeps a full copy of the folder and a full membership ledger.
 
-There is no central node, relay server, NAT traversal, or remote discovery.
-Discovery is local mDNS. Data transfer and announcements use direct
-Noise-encrypted TCP RPCs.
+There is no central node, relay server, NAT traversal, or discovery service.
+Peers are bootstrapped from join tickets and thereafter exchange addresses
+over their own encrypted connections. Data transfer and announcements use
+direct Noise-encrypted TCP RPCs.
 
 ## Model
 
 `peers.json` is the source of truth for group membership. A node is trusted only
 if it appears as active in the local membership ledger.
 
-- mDNS maps active node IDs to LAN socket addresses.
+- the persisted address book (`endpoints.json`) maps node IDs to candidate
+  `host:port` endpoints; it is routing information, never trust.
 - direct RPCs are the source of truth for sync data.
 - announcements are a hint and repair trigger, not an authoritative write.
-- every active node fans announcements out to every other active node it can
-  currently discover.
+- every active node fans announcements out to every other active node it has
+  an address for.
 
 ## Non-Goals
 
-- Sync across NAT or the public internet.
+- NAT traversal or relaying; peers must be directly routable.
 - Trust announcement payloads as authoritative writes.
-- Implement decentralized membership discovery beyond mDNS plus the explicit
-  join flow.
+- Implement discovery beyond ticket bootstrap plus endpoint gossip.
 
 ## Identity And Transport
 
@@ -37,14 +39,30 @@ payloads inside the encrypted session. The Ed25519 signature binds each node ID
 to the Noise handshake transcript, so the encrypted connection is associated
 with the same identity used by the membership ledger.
 
-## Discovery
+## Addressing
 
-Running sync daemons advertise `_lilsync._tcp.local.` over mDNS with a TXT
-record containing their node ID. Browsers ignore their own ID and keep an
-in-memory address book from node ID to socket address.
+Each daemon listens on a stable TCP port: set with `--port` or picked freely
+on first run, then persisted in `.lil/port` and reused so previously shared
+endpoints stay valid across restarts.
 
-Discovery is intentionally LAN-only. If a peer is not visible over mDNS, RPCs to
-that peer time out instead of falling back to a relay.
+Peers learn each other's addresses in two ways, both over TCP:
+
+- **Ticket bootstrap**: a join ticket embeds the issuer's `host:port`
+  endpoints, so the joiner can connect with no prior state.
+- **Endpoint gossip**: each daemon periodically announces its listen port and
+  interface addresses to active members via an `Endpoints` message. The
+  receiver stores the advertised endpoints and puts the connection's observed
+  source address (paired with the advertised port) first, since that address
+  is known to be routable from here.
+
+Learned endpoints are persisted in `.lil/endpoints.json`. When connecting,
+a node tries each candidate endpoint in order; the Noise handshake pins the
+expected node identity, so a stale or wrong address fails closed. Endpoints
+may be DNS names; they are resolved at dial time.
+
+If a peer has no known working address, RPCs to it time out instead of
+falling back to a relay. If every member changes all of its addresses while
+the group is offline, the group must re-bootstrap with a fresh invite.
 
 ## Sync Tree
 
@@ -87,47 +105,52 @@ All RPCs run over a fresh Noise-encrypted TCP connection.
 | `GetNode` | Read one Merkle tree node by path prefix |
 | `GetEntry` | Read one replicated entry by path |
 | `GetObject` | Stream file content by content hash |
-| `Announce` | Deliver a sync-state, filesystem-changed, or peers announcement |
+| `Announce` | Deliver a sync-state, filesystem-changed, peers, or endpoints announcement |
 
 File content is streamed in encrypted chunks. The receiver verifies the BLAKE3
 hash before installing a downloaded object.
 
 ## Announcements
 
-Announcements are sent by LAN fanout RPC to active peers. They carry an
+Announcements are sent by direct fanout RPC to active peers. They carry an
 `origin` node ID and are accepted only if the origin is active in the local
-member ledger.
+member ledger and matches the authenticated RPC peer.
 
 | Message | Published by | When |
 |---|---|---|
 | `FilesystemChanged` | any node | after local filesystem changes |
 | `SyncState` | any node | on startup and periodically |
 | `Peers` | any node | after join/removal and periodically |
+| `Endpoints` | any node | on startup, after a join, and periodically |
 
 Receivers use announcements as hints:
 
 - a different root schedules a Merkle reconciliation against the origin.
 - a filesystem hint can reduce the tree walk to changed prefixes.
 - a peers announcement merges newer member ledger entries.
+- an endpoints announcement updates the persisted address book.
 
 ## Membership
 
 ### Invite Ticket
 
 An existing member creates an invite token and stores it in `.lil/invites.json`.
-The ticket encodes the issuer node ID and the token secret. Tokens are
-single-use and expire.
+The ticket encodes a version byte, the issuer node ID, the token secret, and
+the issuer's `host:port` endpoints (detected from local interfaces, or set
+with `--endpoint`). Tokens are single-use and expire.
 
 ### Join Flow
 
-1. Joiner discovers the issuer by node ID over mDNS.
+1. Joiner seeds its address book with the issuer endpoints from the ticket.
 2. Joiner connects to the issuer and sends `Join`.
 3. Issuer consumes the invite token.
 4. Issuer adds the joiner to its member ledger.
 5. Issuer returns the full member ledger.
-6. Joiner writes that ledger to `.lil/peers.json`.
-7. If not started with `--exit`, the joiner starts its sync daemon and begins
-   advertising itself over mDNS.
+6. Joiner writes that ledger to `.lil/peers.json` and persists the issuer's
+   endpoints to `.lil/endpoints.json`.
+7. If not started with `--exit`, the joiner starts its sync daemon and
+   announces its own endpoints to the group, which is how the issuer (and
+   everyone else) learns the joiner's address.
 
 ### Member Removal
 
@@ -152,6 +175,8 @@ All state lives in `<sync-folder>/.lil/`:
 | File | Contents |
 |---|---|
 | `private.key` | 32-byte Ed25519 private key |
+| `port` | persisted RPC listen port |
+| `endpoints.json` | last known peer endpoints |
 | `daemon.lock` | exclusive sync process lock |
 | `peers.json` | full membership ledger |
 | `invites.json` | outstanding invite tokens with expiry |
@@ -175,10 +200,14 @@ ignored and omitted on the next save.
 
 ## Risks
 
-### LAN-Only Availability
+### Direct-Reachability Availability
 
-Peers cannot sync unless they are on the same LAN and visible over mDNS. This
-is an intentional trade-off after removing relay and NAT traversal support.
+Peers cannot sync unless they can open TCP connections to each other's
+persisted or gossiped addresses. This is an intentional trade-off after
+removing relay and NAT traversal support. A group whose members all change
+every address while fully offline cannot heal itself and needs a fresh
+invite; a single still-valid address anywhere in the group is enough to
+re-propagate current endpoints to everyone.
 
 ### Authorization Drift
 
