@@ -74,17 +74,21 @@ impl FolderState {
         // The clock is persisted separately from the entries; if its file
         // lags or is lost, trusting it would issue versions below ones
         // peers already hold, silently blocking local changes. Never start
-        // below the highest version present in the loaded index.
+        // below the highest version present in the loaded index, nor below
+        // this node's own GC watermark: a new tombstone at or under the
+        // watermark is instantly pruned locally and rejected by peers, so
+        // the deletion silently never propagates.
         let max_entry_lamport = saved_entries
             .values()
             .map(|entry| entry.version.lamport)
             .max()
             .unwrap_or(0);
+        let own_watermark = gc_watermark.get(&origin).copied().unwrap_or(0);
         let scan_cache = crate::scan::ScanCache::load(&state_dir);
         let mut state = Self {
             root,
             origin,
-            lamport: saved_lamport.max(max_entry_lamport),
+            lamport: saved_lamport.max(max_entry_lamport).max(own_watermark),
             gc_watermark,
             entries: saved_entries,
             tree: TreeSnapshot::empty(),
@@ -596,6 +600,16 @@ impl FolderState {
         }
         if changed {
             self.save_gc_watermark();
+            // A merged watermark may cover this node's own origin at or
+            // above the current clock (e.g. after the clock file lagged the
+            // watermark file). Versions issued at or under the own-origin
+            // watermark are dead on arrival — pruned locally and rejected
+            // by peers — so jump the clock past it.
+            let own_watermark = self.gc_watermark.get(&self.origin).copied().unwrap_or(0);
+            if self.lamport < own_watermark {
+                self.lamport = own_watermark;
+                self.save_lamport();
+            }
         }
         let pruned = self.prune_tombstones_covered_by_watermark();
         if pruned > 0 {
@@ -932,6 +946,46 @@ mod tests {
         let changes = state.rescan().unwrap();
         assert_eq!(changes.len(), 1);
         assert!(changes[0].new.version.lamport > max_before);
+    }
+
+    #[test]
+    fn tombstones_survive_a_gc_watermark_at_or_above_the_clock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.txt");
+        fs::write(&file, "one").unwrap();
+        let mut state = FolderState::new(tmp.path().to_path_buf(), "node-a".to_string()).unwrap();
+
+        // Poison the watermark: a peer claims node-a's tombstones are GC'd
+        // up to a lamport far above node-a's current clock.
+        let mut incoming = GcWatermark::new();
+        incoming.insert("node-a".to_string(), state.lamport() + 50);
+        let poisoned_watermark = state.lamport() + 50;
+        state.merge_gc_watermark(&incoming);
+
+        // A deletion must still produce a tombstone that outranks the
+        // watermark; otherwise it is pruned locally, rejected by peers,
+        // and the deletion silently never propagates.
+        fs::remove_file(&file).unwrap();
+        let changes = state.rescan().unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].new.kind, EntryKind::Tombstone);
+        assert!(changes[0].new.version.lamport > poisoned_watermark);
+        assert!(
+            state
+                .entries
+                .get("a.txt")
+                .is_some_and(|e| e.kind == EntryKind::Tombstone),
+            "tombstone must not be instantly pruned by the watermark"
+        );
+
+        // The same invariant must hold across a restart with the poisoned
+        // watermark already on disk.
+        drop(state);
+        let mut state = FolderState::new(tmp.path().to_path_buf(), "node-a".to_string()).unwrap();
+        fs::write(tmp.path().join("b.txt"), "two").unwrap();
+        let changes = state.rescan().unwrap();
+        let created = changes.iter().find(|c| c.path == "b.txt").unwrap();
+        assert!(created.new.version.lamport > poisoned_watermark);
     }
 
     #[test]
